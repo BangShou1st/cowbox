@@ -5,11 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+authors.workspace = true
 description = "Snapshot DAG for cowbox"
+keywords = ["dag", "snapshot", "rollback", "sandbox", "copy-on-write"]
+categories = ["development-tools", "filesystem"]
 
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

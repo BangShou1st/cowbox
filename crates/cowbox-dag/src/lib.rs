@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -115,8 +115,9 @@ impl SessionDag {
                 head: self.head_step,
             });
         }
-        self.nodes.insert(node.id, node.clone());
-        self.head_step = node.id;
+        let id = node.id;
+        self.nodes.insert(id, node);
+        self.head_step = id;
         Ok(())
     }
 
@@ -132,16 +133,20 @@ impl SessionDag {
         if steps == 0 {
             return Ok(self.head_step);
         }
+        let available = self.depth_to_base()?;
+        if steps > available {
+            return Err(DagError::UndoTooDeep {
+                requested: steps,
+                available,
+            });
+        }
         let mut current = self.head_step;
         for _ in 0..steps {
             let node = self
                 .nodes
                 .get(&current)
                 .ok_or(DagError::UnknownStep(current))?;
-            current = node.parent_id.ok_or(DagError::UndoTooDeep {
-                requested: steps,
-                available: 0,
-            })?;
+            current = node.parent_id.ok_or(DagError::MissingBase)?;
         }
         self.head_step = current;
         Ok(current)
@@ -149,8 +154,12 @@ impl SessionDag {
 
     pub fn active_layer_chain(&self) -> Vec<u64> {
         let mut chain = Vec::new();
+        let mut seen = BTreeSet::new();
         let mut current = Some(self.head_step);
         while let Some(id) = current {
+            if !seen.insert(id) {
+                break;
+            }
             if id != BASE_STEP {
                 chain.push(id);
             }
@@ -165,8 +174,12 @@ impl SessionDag {
             return Err(DagError::UnknownStep(step));
         }
         let mut path = Vec::new();
+        let mut seen = BTreeSet::new();
         let mut current = Some(step);
         while let Some(id) = current {
+            if !seen.insert(id) {
+                return Err(DagError::Cycle(id));
+            }
             path.push(id);
             current = self.nodes.get(&id).and_then(|node| node.parent_id);
         }
@@ -196,18 +209,43 @@ impl SessionDag {
             }
         }
         for id in self.nodes.keys() {
-            let mut seen = std::collections::BTreeSet::new();
+            let mut seen = BTreeSet::new();
             let mut current = Some(*id);
             while let Some(step) = current {
                 if !seen.insert(step) {
                     return Err(DagError::Cycle(step));
                 }
-                current = self
-                    .nodes
-                    .get(&step)
-                    .and_then(|node| node.parent_id);
+                current = self.nodes.get(&step).and_then(|node| node.parent_id);
             }
         }
         Ok(())
+    }
+
+    fn depth_to_base(&self) -> Result<usize, DagError> {
+        let mut depth = 0;
+        let mut current = self.head_step;
+        let mut seen = BTreeSet::new();
+        loop {
+            if !seen.insert(current) {
+                return Err(DagError::Cycle(current));
+            }
+            let node = self
+                .nodes
+                .get(&current)
+                .ok_or(DagError::UnknownStep(current))?;
+            match node.parent_id {
+                Some(parent) => {
+                    depth += 1;
+                    current = parent;
+                }
+                None => {
+                    if current != BASE_STEP {
+                        return Err(DagError::MissingBase);
+                    }
+                    break;
+                }
+            }
+        }
+        Ok(depth)
     }
 }
