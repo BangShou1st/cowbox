@@ -85,12 +85,13 @@ pub struct ExecOutcome {
     pub stderr_truncated: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiffOptions {
     pub include_excluded: bool,
     pub line_stats: bool,
     pub max_line_stat_files: usize,
     pub max_line_stat_bytes: u64,
+    pub excluded: Vec<String>,
 }
 
 impl Default for DiffOptions {
@@ -100,15 +101,34 @@ impl Default for DiffOptions {
             line_stats: true,
             max_line_stat_files: 500,
             max_line_stat_bytes: 1024 * 1024,
+            excluded: crate::policy::DEFAULT_EXCLUDES
+                .iter()
+                .map(|item| (*item).to_string())
+                .collect(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommitOptions {
     pub force: bool,
     pub dry_run: bool,
     pub include_excluded: bool,
+    pub excluded: Vec<String>,
+}
+
+impl Default for CommitOptions {
+    fn default() -> Self {
+        Self {
+            force: false,
+            dry_run: false,
+            include_excluded: false,
+            excluded: crate::policy::DEFAULT_EXCLUDES
+                .iter()
+                .map(|item| (*item).to_string())
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
