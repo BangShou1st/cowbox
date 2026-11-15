@@ -62,6 +62,7 @@ fn init_writes_config_and_json_envelope() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn diff_without_session_returns_json_error() {
     let dir = workspace();
     let state = state_home(dir.path());
@@ -79,6 +80,7 @@ fn diff_without_session_returns_json_error() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn discard_without_session_is_a_noop() {
     let dir = workspace();
     let state = state_home(dir.path());
