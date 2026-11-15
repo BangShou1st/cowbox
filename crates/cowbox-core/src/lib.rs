@@ -6,7 +6,15 @@ pub mod model;
 pub mod policy;
 
 #[cfg(target_os = "linux")]
+pub mod commit;
+#[cfg(target_os = "linux")]
+pub mod diff;
+#[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "linux")]
+pub mod manifest;
+#[cfg(target_os = "linux")]
+pub mod whiteout;
 
 pub use error::{CoreError, Result};
 pub use layout::SessionLayout;
