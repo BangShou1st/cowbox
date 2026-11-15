@@ -67,6 +67,75 @@ fn manifest_captures_and_skips_vcs_metadata() {
 }
 
 #[test]
+fn manifest_covers_wide_deep_tree_in_path_order_without_following_symlinks() {
+    let (root, layout) = fixture();
+    let outside = root.path().join("outside");
+    write(&outside.join("must-not-be-captured.txt"), "outside\n");
+    for branch in 0..40 {
+        write(
+            &layout.workspace.join(format!(
+                "branches/branch-{branch:02}/deep/nested/payload.txt"
+            )),
+            &format!("branch {branch}\n"),
+        );
+    }
+    write(&layout.workspace.join("z-root.txt"), "root\n");
+    symlink(&outside, layout.workspace.join("outside-link")).expect("directory symlink");
+
+    let entries = manifest::capture_base_manifest(&layout.workspace, &layout.base_manifest_path())
+        .expect("capture manifest");
+    let paths = entries
+        .iter()
+        .map(|entry| entry.rel_path.clone())
+        .collect::<Vec<_>>();
+    let mut sorted_paths = paths.clone();
+    sorted_paths.sort();
+    assert_eq!(paths, sorted_paths, "returned entries were not path-sorted");
+
+    for branch in 0..40 {
+        let rel_path = format!("branches/branch-{branch:02}/deep/nested/payload.txt");
+        let entry = entries
+            .iter()
+            .find(|entry| entry.rel_path == Path::new(&rel_path))
+            .unwrap_or_else(|| panic!("missing wide/deep manifest entry {rel_path}"));
+        assert_eq!(entry.kind, EntryKind::File);
+        assert_eq!(
+            entry.size,
+            format!("branch {branch}\n").len() as u64,
+            "manifest size did not belong to {rel_path}"
+        );
+    }
+    let link = entries
+        .iter()
+        .find(|entry| entry.rel_path == Path::new("outside-link"))
+        .expect("symlink entry");
+    assert_eq!(link.kind, EntryKind::Symlink);
+    assert_eq!(link.symlink_target.as_deref(), Some(outside.as_path()));
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| entry.rel_path != Path::new("outside-link")
+                && entry.rel_path.starts_with("outside-link")),
+        "manifest followed a directory symlink"
+    );
+
+    let manifest_text =
+        fs::read_to_string(layout.base_manifest_path()).expect("persisted manifest");
+    let persisted_paths = manifest_text
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<manifest::ManifestEntry>(line)
+                .expect("manifest line")
+                .rel_path
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        persisted_paths, paths,
+        "JSONL order diverged from the returned manifest"
+    );
+}
+
+#[test]
 fn old_manifest_without_hardlink_or_xattr_fields_still_loads() {
     let (_root, layout) = fixture();
     if let Some(parent) = layout.base_manifest_path().parent() {

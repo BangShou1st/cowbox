@@ -38,6 +38,18 @@ bash scripts/smoke.sh
 Benchmarks:
 
 ```bash
+export CARGO_TARGET_DIR="$HOME/.cache/cowbox-target"
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+
+bash scripts/bench-m2.sh \
+  --samples 20 \
+  --warmups 1 \
+  --file-counts 10000 200000 \
+  --depths 1 \
+  --json-output "$HOME/cowbox-bench-results/cowbox-m2-rerun-$stamp.json" \
+  --markdown-output "$HOME/cowbox-bench-results/cowbox-m2-rerun-$stamp.md"
+
+# Pure library microbenchmarks:
 scripts/bench.sh
 ```
 

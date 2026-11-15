@@ -2,11 +2,16 @@ use crate::error::{CoreError, Result};
 use crate::model::EntryKind;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use walkdir::{DirEntry, WalkDir};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::thread;
+
+const MAX_CAPTURE_THREADS: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManifestEntry {
@@ -72,52 +77,11 @@ pub fn mtime_ns(metadata: &fs::Metadata) -> i128 {
 }
 
 pub fn capture_base_manifest(root: &Path, output: &Path) -> Result<Vec<ManifestEntry>> {
-    let mut entries = Vec::new();
-    let walker = WalkDir::new(root)
-        .follow_links(false)
-        .min_depth(1)
-        .into_iter()
-        .filter_entry(|entry| !is_skipped(entry));
-
-    for entry in walker {
-        let entry = entry.map_err(|error| CoreError::StateCorrupted {
-            step: 0,
-            reason: format!("failed to walk base workspace: {error}"),
-        })?;
-        if !entry.file_type().is_file()
-            && !entry.file_type().is_dir()
-            && !entry.file_type().is_symlink()
-        {
-            continue;
-        }
-        let rel_path = entry
-            .path()
-            .strip_prefix(root)
-            .map_err(|_| CoreError::Config("manifest path escaped the workspace".to_string()))?
-            .to_path_buf();
-        if rel_path.as_os_str().is_empty() {
-            continue;
-        }
-        let metadata = fs::symlink_metadata(entry.path())?;
-        entries.push(ManifestEntry::from_metadata(
-            rel_path,
-            entry.path(),
-            &metadata,
-        )?);
-    }
-
-    entries.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)?;
     }
     let file = File::create(output)?;
-    let mut writer = BufWriter::new(file);
-    for entry in &entries {
-        serde_json::to_writer(&mut writer, entry)?;
-        writer.write_all(b"\n")?;
-    }
-    writer.flush()?;
-    Ok(entries)
+    capture_manifest(root, &file)
 }
 
 pub fn load_manifest(path: &Path) -> Result<BTreeMap<PathBuf, ManifestEntry>> {
@@ -262,10 +226,259 @@ pub fn top_layer_visible_path(
     None
 }
 
-fn is_skipped(entry: &DirEntry) -> bool {
-    if entry.depth() == 0 {
-        return false;
+struct CaptureTask {
+    directory: PathBuf,
+    rel_path: PathBuf,
+}
+
+struct CapturePacket {
+    task_index: usize,
+    directory: CapturedDirectory,
+    children: Vec<CaptureTask>,
+}
+
+struct CapturedDirectory {
+    entries: Vec<ManifestEntry>,
+    jsonl: Vec<u8>,
+    jsonl_ends: Vec<usize>,
+}
+
+fn capture_manifest(root: &Path, file: &File) -> Result<Vec<ManifestEntry>> {
+    let mut frontier = vec![CaptureTask {
+        directory: root.to_path_buf(),
+        rel_path: PathBuf::new(),
+    }];
+    let mut directories = BTreeMap::new();
+    while !frontier.is_empty() {
+        let packets = capture_frontier(&frontier)?;
+        let mut next_frontier = Vec::new();
+        for packet in packets {
+            let rel_path = frontier[packet.task_index].rel_path.clone();
+            directories.insert(rel_path, packet.directory);
+            next_frontier.extend(packet.children);
+        }
+        next_frontier.sort_unstable_by(|left, right| left.rel_path.cmp(&right.rel_path));
+        frontier = next_frontier;
     }
-    let name = entry.file_name().to_string_lossy();
-    name == ".git" || name == ".cowbox"
+    write_ordered_entries(root, directories, file)
+}
+
+fn write_ordered_entries(
+    root: &Path,
+    mut directories: BTreeMap<PathBuf, CapturedDirectory>,
+    file: &File,
+) -> Result<Vec<ManifestEntry>> {
+    let root_entries =
+        directories
+            .remove(Path::new(""))
+            .ok_or_else(|| CoreError::StateCorrupted {
+                step: 0,
+                reason: format!("manifest capture omitted {}", root.display()),
+            })?;
+    let mut stack = vec![DirectoryCursor::new(root_entries)];
+    let mut entries = Vec::new();
+    let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+    while let Some(cursor) = stack.last_mut() {
+        let Some(entry) = cursor.entries.next() else {
+            if cursor.jsonl_ends.next().is_some() || cursor.start != cursor.jsonl.len() {
+                return Err(CoreError::StateCorrupted {
+                    step: 0,
+                    reason: "manifest serialization offsets were inconsistent".to_string(),
+                });
+            }
+            stack.pop();
+            continue;
+        };
+        let Some(end) = cursor.jsonl_ends.next() else {
+            return Err(CoreError::StateCorrupted {
+                step: 0,
+                reason: "manifest serialization was missing an entry".to_string(),
+            });
+        };
+        writer.write_all(&cursor.jsonl[cursor.start..end])?;
+        cursor.start = end;
+        let child = (entry.kind == EntryKind::Directory).then(|| entry.rel_path.clone());
+        entries.push(entry);
+        if let Some(child) = child {
+            let child_entries =
+                directories
+                    .remove(&child)
+                    .ok_or_else(|| CoreError::StateCorrupted {
+                        step: 0,
+                        reason: format!("manifest capture omitted directory {}", child.display()),
+                    })?;
+            stack.push(DirectoryCursor::new(child_entries));
+        }
+    }
+    writer.flush()?;
+    if let Some(path) = directories.keys().next() {
+        return Err(CoreError::StateCorrupted {
+            step: 0,
+            reason: format!(
+                "manifest capture found unreachable directory {}",
+                path.display()
+            ),
+        });
+    }
+    Ok(entries)
+}
+
+struct DirectoryCursor {
+    entries: std::vec::IntoIter<ManifestEntry>,
+    jsonl: Vec<u8>,
+    jsonl_ends: std::vec::IntoIter<usize>,
+    start: usize,
+}
+
+impl DirectoryCursor {
+    fn new(directory: CapturedDirectory) -> Self {
+        Self {
+            entries: directory.entries.into_iter(),
+            jsonl: directory.jsonl,
+            jsonl_ends: directory.jsonl_ends.into_iter(),
+            start: 0,
+        }
+    }
+}
+
+fn serialize_entries(entries: &[ManifestEntry]) -> Result<(Vec<u8>, Vec<usize>)> {
+    let mut output = Vec::with_capacity(entries.len().saturating_mul(220));
+    let mut ends = Vec::with_capacity(entries.len());
+    for entry in entries {
+        serde_json::to_writer(&mut output, entry)?;
+        output.push(b'\n');
+        ends.push(output.len());
+    }
+    Ok((output, ends))
+}
+
+fn capture_frontier(tasks: &[CaptureTask]) -> Result<Vec<CapturePacket>> {
+    let worker_count = capture_worker_count(tasks.len());
+    if worker_count == 1 {
+        return tasks
+            .iter()
+            .enumerate()
+            .map(|(task_index, task)| capture_task(task_index, task))
+            .collect();
+    }
+
+    let next_task = AtomicUsize::new(0);
+    let (sender, receiver) = mpsc::sync_channel::<Result<CapturePacket>>(worker_count);
+    thread::scope(|scope| -> Result<Vec<CapturePacket>> {
+        let mut handles = Vec::with_capacity(worker_count);
+        let next_task = &next_task;
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            handles.push(scope.spawn(move || {
+                loop {
+                    let task_index = next_task.fetch_add(1, Ordering::Relaxed);
+                    let Some(task) = tasks.get(task_index) else {
+                        break;
+                    };
+                    let packet = match capture_task(task_index, task) {
+                        Ok(packet) => packet,
+                        Err(error) => {
+                            let _ = sender.send(Err(error));
+                            break;
+                        }
+                    };
+                    if sender.send(Ok(packet)).is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+        drop(sender);
+
+        let mut packets = (0..tasks.len()).map(|_| None).collect::<Vec<_>>();
+        let mut first_error = None;
+        for packet in receiver {
+            match packet {
+                Ok(packet) => {
+                    let task_index = packet.task_index;
+                    packets[task_index] = Some(packet);
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        for handle in handles {
+            if handle.join().is_err() {
+                first_error.get_or_insert_with(|| {
+                    CoreError::Io(std::io::Error::other("manifest capture worker panicked"))
+                });
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        packets
+            .into_iter()
+            .map(|packet| {
+                packet.ok_or_else(|| CoreError::StateCorrupted {
+                    step: 0,
+                    reason: "manifest capture worker returned no packet".to_string(),
+                })
+            })
+            .collect()
+    })
+}
+
+fn capture_task(task_index: usize, task: &CaptureTask) -> Result<CapturePacket> {
+    let reader = fs::read_dir(&task.directory).map_err(|error| CoreError::StateCorrupted {
+        step: 0,
+        reason: format!(
+            "failed to walk base workspace {}: {error}",
+            task.directory.display()
+        ),
+    })?;
+    let mut entries = Vec::new();
+    let mut children = Vec::new();
+    for item in reader {
+        let item = item.map_err(|error| CoreError::StateCorrupted {
+            step: 0,
+            reason: format!("failed to walk base workspace: {error}"),
+        })?;
+        let name = item.file_name();
+        if is_skipped_name(&name) {
+            continue;
+        }
+        let path = item.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_file() && !metadata.is_dir() && !metadata.is_symlink() {
+            continue;
+        }
+        let rel_path = task.rel_path.join(name);
+        if metadata.is_dir() {
+            children.push(CaptureTask {
+                directory: path.clone(),
+                rel_path: rel_path.clone(),
+            });
+        }
+        entries.push(ManifestEntry::from_metadata(rel_path, &path, &metadata)?);
+    }
+    entries.sort_unstable_by(|left, right| left.rel_path.cmp(&right.rel_path));
+    children.sort_unstable_by(|left, right| left.rel_path.cmp(&right.rel_path));
+    let (jsonl, jsonl_ends) = serialize_entries(&entries)?;
+    Ok(CapturePacket {
+        task_index,
+        directory: CapturedDirectory {
+            entries,
+            jsonl,
+            jsonl_ends,
+        },
+        children,
+    })
+}
+
+fn capture_worker_count(task_count: usize) -> usize {
+    let available = thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    available.min(MAX_CAPTURE_THREADS).min(task_count).max(1)
+}
+
+fn is_skipped_name(name: &OsStr) -> bool {
+    name == OsStr::new(".git") || name == OsStr::new(".cowbox")
 }

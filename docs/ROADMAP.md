@@ -19,8 +19,10 @@ Status: preview available (2026-11-15). The public repository and CI are live.
 - [x] 10k-file adversarial suite, 9p smoke, and Criterion benchmarks.
 - [x] CI on Ubuntu 22.04/24.04 and a public M1 repository.
 
-M1 supports up to 150 active layers per session. Longer sessions must commit or
-discard and start a new one; layer compaction is an M2 item.
+M1 mounts at most 150 parent layers when creating a step. A step from a
+150-layer head is accepted and creates layer 151; the following step is rejected
+with `CONFIG_ERROR`. Longer sessions must commit or discard and start a new one;
+layer compaction is an M2 item.
 
 Explicitly excluded from M1: MCP proxy, native Windows, macOS, network
 isolation, multi-agent racing, and the eval leaderboard.
@@ -46,7 +48,9 @@ Status: preview released in `0.3.0-m1`.
   kernel supports it.
 - Read-only cache bind mounts for Cargo/npm/pip caches so sandboxed installs do
   not re-download gigabytes.
-- 200k-file benchmark fixtures and regression tracking.
+- 200k-file benchmark fixtures, first-round wall-clock measurements, and
+  parallel first-session manifest capture.
+- Benchmark regression tracking on a dedicated runner.
 - Blocked-write audit counters (requires an interception layer, not Landlock
   alone).
 - Better `doctor` diagnostics for AppArmor, WSL config, and filesystem quirks.

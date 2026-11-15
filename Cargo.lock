@@ -277,6 +277,7 @@ dependencies = [
  "include_dir",
  "predicates",
  "rusqlite",
+ "rustix",
  "semver",
  "serde",
  "serde_json",
