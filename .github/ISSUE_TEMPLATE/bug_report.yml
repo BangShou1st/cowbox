@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a reproducible cowbox problem
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please remove secrets from command output before posting.
+        Security vulnerabilities should use private vulnerability reporting, not this form.
+  - type: input
+    id: version
+    attributes:
+      label: cowbox version
+      placeholder: "0.1.0-m1"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Windows/WSL version, distribution, kernel, filesystem
+      placeholder: "Windows 11, WSL2 Ubuntu 24.04, 6.6.87, ext4"
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: cowbox doctor --json
+      description: Paste the output with secrets and private paths removed.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction
+      description: The smallest fixture and command sequence that reproduces the issue.
+      placeholder: |
+        1. mkdir /tmp/cowbox-repro && cd /tmp/cowbox-repro
+        2. cowbox init
+        3. cowbox run -- ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the full error and exit code.
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Relevant logs, journal paths, or screenshots.
+    validations:
+      required: false

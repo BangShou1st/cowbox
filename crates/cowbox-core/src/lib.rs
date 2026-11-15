@@ -68,8 +68,9 @@ impl UnsupportedBackend {
     fn unsupported() -> CoreError {
         CoreError::CowUnsupported {
             path: Path::new("/").to_path_buf(),
-            reason: "cowbox M1 requires Linux (WSL2 is supported); native Windows is planned for M3"
-                .to_string(),
+            reason:
+                "cowbox M1 requires Linux (WSL2 is supported); native Windows is planned for M3"
+                    .to_string(),
         }
     }
 }

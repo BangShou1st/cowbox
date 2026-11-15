@@ -35,7 +35,10 @@ impl Default for ExecPolicy {
             timeout: Some(Duration::from_secs(30 * 60)),
             clean_env: false,
             env: BTreeMap::new(),
-            excluded: DEFAULT_EXCLUDES.iter().map(|item| (*item).to_string()).collect(),
+            excluded: DEFAULT_EXCLUDES
+                .iter()
+                .map(|item| (*item).to_string())
+                .collect(),
             capture_output: false,
             cwd: None,
         }

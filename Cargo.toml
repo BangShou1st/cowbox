@@ -17,9 +17,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
 repository = "https://github.com/BangShou1st/cowbox"
-homepage = "https://github.com/BangShou1st/cowbox"
 authors = ["BangShou1st"]
-description = "Millisecond Copy-on-Write sandboxes for AI coding agents"
 
 [workspace.dependencies]
 anyhow = "1"

@@ -5,7 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+authors.workspace = true
 description = "Command-line interface for cowbox"
+keywords = ["cli", "sandbox", "copy-on-write", "ai-agents", "developer-tools"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "cowbox"

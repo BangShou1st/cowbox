@@ -1,0 +1,62 @@
+# cowbox roadmap
+
+cowbox follows a staged path: make the local Linux engine honest and
+measurable first, then add agent protocol integration, then native platforms.
+
+## M1: Linux/WSL2 engine preview
+
+Status: in progress.
+
+- [x] Cargo workspace and public interfaces.
+- [ ] Snapshot DAG with rollback, undo, branching, and serialization.
+- [ ] Unprivileged OverlayFS with `userxattr` and multi-layer lowerdirs.
+- [ ] Landlock path fencing and environment sanitization.
+- [ ] PID 1 supervisor, orphan reaping, and timeouts.
+- [ ] Whiteout-aware diff (char device and xattr forms).
+- [ ] Commit journal, host-drift detection, and atomic write order.
+- [ ] `init`, `run`, `diff`, `log`, `rollback`, `undo`, `commit`, `discard`,
+  `doctor`, and `stats`.
+- [ ] 10k-file adversarial suite, 9p smoke, and Criterion benchmarks.
+- [ ] CI on Ubuntu 22.04/24.04 and a public M1 repository.
+
+Explicitly excluded from M1: MCP proxy, native Windows, macOS, network
+isolation, multi-agent racing, and the eval leaderboard.
+
+## M2: stronger containment and scale
+
+- Network policy via seccomp user notification or Landlock ABI 4+ where the
+  kernel supports it.
+- Read-only cache bind mounts for Cargo/npm/pip caches so sandboxed installs do
+  not re-download gigabytes.
+- Commit hardening for SQLite sidecars, hardlinks, xattrs, and resumable
+  journals.
+- 200k-file benchmark fixtures and regression tracking.
+- Blocked-write audit counters (requires an interception layer, not Landlock
+  alone).
+- Better `doctor` diagnostics for AppArmor, WSL config, and filesystem quirks.
+
+## M3: agent integration
+
+- `cowbox mcp-proxy -- <upstream MCP server>` with transparent stdio JSON-RPC
+  forwarding.
+- Synthetic MCP tools: `cowbox_diff`, `cowbox_rollback`, `cowbox_commit`.
+- Auto-checkpoint on mutating `tools/call` requests.
+- `cowbox.exe` WSL bridge for Codex Desktop: path mapping, raw pipes, UTF-16LE
+  stderr cleanup, `WSL_INTEROP` removal, and Ctrl+C process-tree cleanup.
+- A `skills/cowbox/SKILL.md` workflow that prefers rollback over stacking
+  speculative fixes.
+
+## M4: native platforms and evaluation
+
+- Native Windows 11 backend: ReFS block cloning + Job Objects.
+- macOS backend: APFS `clonefile` + `sandbox-exec`/kqueue process tracking.
+- A reproducible eval harness for destructive refactor, dependency, migration,
+  and prompt-injection tasks.
+- Public leaderboard for agent recovery behavior, with published methodology.
+
+## Non-goals
+
+- A Docker or VM fallback. cowbox is explicitly a local CoW tool.
+- A web UI or hosted service in the near term.
+- Claiming performance or safety properties that are not reproduced by the
+  checked-in benchmark and adversarial suites.

@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose a focused improvement
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        cowbox M1 intentionally excludes MCP, native Windows, macOS, network
+        isolation, and multi-agent racing. Please check docs/ROADMAP.md first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What real workflow is blocked or painful?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What would you change, and which milestone does it belong to?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence or benchmark
+      description: For performance/security claims, include a reproduction or measurement plan.
+    validations:
+      required: false
