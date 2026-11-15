@@ -1,0 +1,58 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/cowbox-core",
+    "crates/cowbox-dag",
+    "crates/cowbox-cli",
+]
+default-members = [
+    "crates/cowbox-core",
+    "crates/cowbox-dag",
+    "crates/cowbox-cli",
+]
+
+[workspace.package]
+version = "0.1.0-m1"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/BangShou1st/cowbox"
+homepage = "https://github.com/BangShou1st/cowbox"
+authors = ["BangShou1st"]
+description = "Millisecond Copy-on-Write sandboxes for AI coding agents"
+
+[workspace.dependencies]
+anyhow = "1"
+assert_cmd = "2"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+criterion = "0.5"
+ctrlc = "3"
+filetime = "0.2"
+fs2 = "0.4"
+hex = "0.4"
+humantime = "2"
+landlock = "0.4"
+predicates = "3"
+rustix = { version = "1.1", features = ["fs", "mount", "process", "system", "thread", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+similar = "2"
+tempfile = "3"
+thiserror = "2"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+walkdir = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
