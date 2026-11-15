@@ -53,7 +53,6 @@ impl Default for AgentConfig {
                 "database_migration".to_string(),
                 "dependency_upgrade".to_string(),
                 "multi_file_refactor".to_string(),
-                "untrusted_script".to_string(),
             ],
             max_files_without_prompt: 5,
         }
@@ -210,7 +209,7 @@ require_clean_host = true
 [agent]
 mode = "ask"
 require_confirmation = true
-triggers = ["destructive_shell", "database_migration", "dependency_upgrade", "multi_file_refactor", "untrusted_script"]
+triggers = ["destructive_shell", "database_migration", "dependency_upgrade", "multi_file_refactor"]
 max_files_without_prompt = 5
 "#,
             excluded = default_excluded()

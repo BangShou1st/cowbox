@@ -15,12 +15,14 @@ pub mod linux;
 pub mod manifest;
 #[cfg(target_os = "linux")]
 pub mod whiteout;
+#[cfg(target_os = "linux")]
+mod xattr;
 
 pub use error::{CoreError, Result};
 pub use layout::SessionLayout;
 pub use model::{
-    Capabilities, ChangeKind, CommitOptions, CommitReport, DiffOptions, EntryKind, ExecOutcome,
-    FileChange, WhiteoutKind,
+    Capabilities, ChangeKind, CommitOptions, CommitRecoveryAction, CommitReport, DiffOptions,
+    EntryKind, ExecOutcome, FileChange, PendingRecovery, RecoveryReport, WhiteoutKind,
 };
 pub use policy::ExecPolicy;
 
@@ -55,6 +57,12 @@ pub trait SandboxBackend: Send + Sync {
         target_layers: &[u64],
         options: &CommitOptions,
     ) -> Result<CommitReport>;
+
+    fn recover_commit(&self, layout: &SessionLayout) -> Result<RecoveryReport>;
+
+    fn inspect_recovery(&self, layout: &SessionLayout) -> Result<Option<PendingRecovery>>;
+
+    fn finalize_commit(&self, layout: &SessionLayout) -> Result<()>;
 
     fn destroy_session(&self, layout: &SessionLayout) -> Result<()>;
 }
@@ -119,6 +127,18 @@ impl SandboxBackend for UnsupportedBackend {
         _target_layers: &[u64],
         _options: &CommitOptions,
     ) -> Result<CommitReport> {
+        Err(Self::unsupported())
+    }
+
+    fn recover_commit(&self, _layout: &SessionLayout) -> Result<RecoveryReport> {
+        Err(Self::unsupported())
+    }
+
+    fn inspect_recovery(&self, _layout: &SessionLayout) -> Result<Option<PendingRecovery>> {
+        Err(Self::unsupported())
+    }
+
+    fn finalize_commit(&self, _layout: &SessionLayout) -> Result<()> {
         Err(Self::unsupported())
     }
 

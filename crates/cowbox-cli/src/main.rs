@@ -4,6 +4,7 @@ mod agent;
 mod cli;
 mod commands;
 mod config;
+mod demo;
 mod error;
 mod json;
 mod render;

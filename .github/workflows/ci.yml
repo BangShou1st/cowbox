@@ -90,16 +90,13 @@ jobs:
           COWBOX_REQUIRE_SANDBOX: "1"
         run: cargo test -p cowbox-cli --test adversarial_suite -- --test-threads=1
 
-      - name: CLI smoke
+      - name: CLI smoke: run / diff / rollback / commit --dry-run
         run: |
           cargo build -p cowbox-cli
-          BIN="$GITHUB_WORKSPACE/target/debug/cowbox"
-          "$BIN" --version
-          "$BIN" doctor --json
-          mkdir -p /tmp/cowbox-ci
-          cd /tmp/cowbox-ci
-          "$BIN" init
-          "$BIN" run --json -- true
+          COWBOX_BIN="$GITHUB_WORKSPACE/target/debug/cowbox" bash scripts/smoke.sh
+          "$GITHUB_WORKSPACE/target/debug/cowbox" --version
+          "$GITHUB_WORKSPACE/target/debug/cowbox" doctor --json
+          "$GITHUB_WORKSPACE/target/debug/cowbox" demo --json
 
   benchmarks:
     name: benchmark compile / smoke

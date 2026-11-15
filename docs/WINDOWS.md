@@ -8,12 +8,16 @@ WSL2; the project does not need to move out of `E:\...`.
 ```powershell
 .\cowbox.exe setup
 cowbox doctor
+cowbox demo
 ```
 
 `setup` downloads the matching Linux release into WSL `~/.local/bin/cowbox`,
 copies the Windows launcher into `%USERPROFILE%\.local\bin`, writes
 `%APPDATA%\cowbox\config.toml`, and verifies `doctor`. It does **not** install
 any agent skill.
+
+`cowbox demo` delegates to the Linux engine, creates its fixture under WSL
+`/tmp`, and leaves the current Windows project untouched.
 
 Add `%USERPROFILE%\.local\bin` to `PATH` if `cowbox` is not found. Re-run
 `cowbox setup --force` to reinstall.

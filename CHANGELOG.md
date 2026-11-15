@@ -4,6 +4,47 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [0.3.0-m1] - 2026-11-15
+
+### Added
+
+- `cowbox demo` with isolated fixture, rollback verification, JSON output, and
+  an opt-in `--keep` mode.
+- `cowbox sessions` for global session inventory and `cowbox gc` for safely
+  removing finalized session state, including read-only OverlayFS layers.
+- `cowbox commit --recover` for reconciling an interrupted commit: it restores
+  the host before the durable `applied` point and finalizes the session after
+  that point.
+- SQLite sidecar grouping, `user.*` xattr preservation, hardlink preservation
+  within a commit set, hardlink-backed rollback where the filesystems allow it,
+  and phased commit journals with drift guards.
+- Deterministic process-interruption tests that kill the real CLI after a
+  partial host write, during recovery, after the durable commit point but
+  before session finalization, with a stale active pointer after the committed
+  session record was saved, and after the active pointer was cleared but before
+  journal finalization.
+
+### Changed
+
+- `cowbox commit` now requires terminal confirmation. Non-interactive callers
+  must pass `--yes` after obtaining human approval.
+- Successful commits retain their journal and backups until the CLI has saved
+  the committed session and cleared the active pointer. Journal finalization is
+  idempotent, and `gc` skips sessions with unfinished commit recovery.
+- Commit backups use an independent content copy plus an original-inode
+  hardlink where possible, so a host edit cannot mutate the recovery copy while
+  still preserving hardlinks to untouched host paths during rollback.
+- Recovery documentation now states the guarantee precisely: process
+  interruption recovery only, not power-loss, kernel-crash, or storage-failure
+  durability.
+- New agent policies no longer advertise untrusted scripts or MCP tools as
+  handled scenarios. Documentation now states that network isolation and
+  remote database/service rollback are outside M1.
+- Base manifests now record inode, link count, and xattr digests; old manifests
+  remain readable.
+
 ## [0.2.0-m1] - 2026-11-15
 
 ### Added
@@ -54,4 +95,5 @@ All notable changes to this project are documented here. The format follows
   read-only during a session.
 - Hardlinks and xattrs are not preserved on commit in M1.
 
+[0.3.0-m1]: https://github.com/BangShou1st/cowbox/releases/tag/v0.3.0-m1
 [0.1.0-m1]: https://github.com/BangShou1st/cowbox/releases/tag/v0.1.0-m1

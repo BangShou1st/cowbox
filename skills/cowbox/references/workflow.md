@@ -2,7 +2,8 @@
 
 Every `cowbox run -- <command>` records a step. `cowbox rollback <step>` only
 moves the session head; it never writes the host. `cowbox commit` applies the
-net changes to the host and requires human approval.
+net changes to the host and requires human approval. Non-interactive callers
+must use `cowbox commit --yes` only after that approval.
 
 Recommended loop:
 
@@ -15,9 +16,13 @@ cowbox log
 cowbox rollback <last-clean-step>
 # Otherwise:
 cowbox commit --dry-run
-cowbox commit
+# After explicit human approval:
+cowbox commit --yes
 ```
 
 Use `cowbox discard --yes` to throw the session away. M1 supports up to 150
 layers per session; commit or discard and start a new session when the limit is
 reached.
+
+cowbox does not isolate the network or reverse remote database/service changes.
+It only protects the local workspace file tree.

@@ -60,18 +60,46 @@ without the fence.
 The base lowerdir is the live host workspace. cowbox therefore treats the host
 as read-only during a session:
 
-- At session start it records path, kind, mode, size, mtime, and symlink target
-  in a base manifest.
+- At session start it records path, kind, mode, size, mtime, inode, link count,
+  `user.*` xattr digest, and symlink target in a base manifest.
 - At commit it compares the affected host paths against that manifest.
 - A mismatch is a conflict. `--force` still copies the current host file into
   the journal before replacing it.
+- The CLI asks for confirmation in a terminal. Non-interactive callers must
+  use `--yes` only after explicit human approval.
+- SQLite databases are committed with their `-wal`, `-shm`, and `-journal`
+  sidecars when a standard SQLite header is detected. Stale host sidecars are
+  removed when the sandbox has no matching upper-layer sidecar.
+- Hardlinks are preserved among files in the same commit set. `user.*` xattrs
+  are preserved; other xattr namespaces are left untouched.
+- Commit journals record `prepared`, `applying`, `restoring`, `applied`,
+  `complete`, and `rolled_back` phases. The durable `applied` marker is the
+  commit point. Recovery before that point restores the host and leaves the
+  original session active; recovery at or after it verifies the post-state,
+  marks the session committed, clears the active pointer, and only then marks
+  the journal complete.
+- Journal backups combine an independent content copy with an original-inode
+  hardlink where the filesystem allows it. The copy remains stable if the host
+  is edited, while the hardlink lets rollback reconnect pre-existing host
+  links. Backups are retained until the restored manifest and journal phase,
+  or the committed session record and cleared active pointer, are persisted.
+- `commit --recover` validates journal metadata, operation paths, backup
+  placement, and every affected path against its recorded pre- or post-state.
+  It refuses to overwrite external edits and preserves the journal and backups
+  for inspection. `gc` skips sessions with an unfinished commit journal.
 - Every write goes through a same-directory temp file and rename.
 - `.git` is never written. Device/FIFO/socket entries are refused. setuid and
   setgid bits are cleared.
 
 Limitations: metadata drift detection is not content hashing for the entire
-tree; hardlinks and xattrs are not preserved in M1; a host file edited with
-identical size and mtime can evade the check.
+tree; a host file edited with identical size, mtime, inode, and xattrs can
+evade the check. After a successful commit, hardlinks to host files outside the
+commit set become separate inodes; rollback uses hardlink backups when the
+workspace and state filesystems allow it. Non-`user.*` xattrs are not copied.
+Recovery guards individual paths; external edits inside a directory restored as
+a whole may still require manual inspection. The journal is fsynced, but the
+recovery contract covers process interruption only. It is not a power-loss,
+kernel-crash, or storage-failure guarantee.
 
 ## 7. Known gaps
 

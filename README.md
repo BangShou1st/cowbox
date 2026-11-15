@@ -46,14 +46,18 @@ your real project, with a cheap undo button.
 
 ```bash
 cowbox run -- <command>      # run in a CoW view; every invocation is a step
+cowbox demo                  # verify rollback end to end in an isolated fixture
 cowbox diff                  # inspect net changes and sandbox side effects
 cowbox log                   # see the step DAG, including branches
 cowbox rollback <step>       # move the head pointer; no host writes
 cowbox undo [n]              # shortcut for rolling back n steps
 cowbox commit                # atomically apply the net changes to the host
+cowbox commit --recover      # reconcile an interrupted commit (restore or finish)
 cowbox discard               # throw the sandbox state away
 cowbox doctor                # check kernel, OverlayFS, xattr, Landlock
 cowbox stats                 # inspect steps, rollbacks, orphans, disk use
+cowbox sessions              # list active and finalized sessions across projects
+cowbox gc --dry-run          # preview old session state that can be removed
 ```
 
 All commands support `--json`. `run` also supports `--trace-chrome` for a
@@ -88,6 +92,11 @@ Chrome Trace JSON of namespace, mount, diff, and commit spans.
   audit and for branching.
 - `commit` computes the net diff from the base, checks for host drift, backs up
   every affected host path into a journal, and applies changes in a safe order.
+- Commit keeps SQLite `-wal`/`-shm`/`-journal` sidecars grouped with their
+  database, preserves `user.*` xattrs, and keeps hardlinks among files that are
+  committed together. The journal's durable `applied` phase is the commit
+  point. `cowbox commit --recover` restores the host if the process stopped
+  before that point, or finalizes the committed session if it stopped after.
 - Landlock denies writes outside the workspace and the session's private
   home/tmp/cache directories. A PID namespace reaps background children when a
   step ends.
@@ -103,6 +112,7 @@ terminal:
 ```powershell
 .\cowbox.exe setup
 cowbox doctor
+cowbox demo
 cowbox install-skill --list
 cowbox install-skill --harness codex
 ```
@@ -110,6 +120,11 @@ cowbox install-skill --harness codex
 `setup` installs the Windows launcher and the Linux engine in WSL, but **does
 not install a skill**. `install-skill` is the explicit opt-in step. Your project
 can stay on `E:\...`; the launcher maps it to `/mnt/e/...` inside WSL.
+
+`cowbox demo` creates an isolated fixture under `/tmp`, performs a destructive
+command, previews the commit, rolls back, and verifies that the fixture files
+are restored. It never touches the current project. Use `--keep` to inspect the
+fixture or `--json` for machine-readable output.
 
 In a project:
 
@@ -151,6 +166,7 @@ export CARGO_TARGET_DIR="$HOME/.cache/cowbox-target"
 cargo install --path crates/cowbox-cli
 
 cowbox doctor
+cowbox demo
 ```
 
 If the source checkout is on `/mnt/e`, keep `CARGO_TARGET_DIR` on the WSL
@@ -178,6 +194,11 @@ cowbox rollback 0
 `--` before the command so cowbox never tries to parse its flags. A failed
 command still becomes a step, so you can inspect or roll it back.
 
+Committed and discarded sessions remain available for audit. `cowbox sessions`
+shows their disk use, and `cowbox gc` removes finalized sessions older than
+seven days. Active sessions are never deleted. Use `--all` to ignore the age
+threshold, `--dry-run` to preview, and `--yes` for non-interactive execution.
+
 ## Safety model
 
 - cowbox M1 uses **Landlock ABI 3** for path-based read/write fencing and a
@@ -191,6 +212,19 @@ command still becomes a step, so you can inspect or roll it back.
 - M1 is a guard against **accidental damage and agent mistakes**, not a
   hardened sandbox for hostile code. Kernel exploits and deliberately malicious
   binaries are out of scope.
+- `cowbox commit` asks for confirmation in a terminal. Non-interactive callers
+  must use `cowbox commit --yes` after obtaining explicit human approval.
+- Hardlinks are preserved among files in the same commit set. After a
+  successful commit, a hardlink to a host file that is not being committed
+  becomes a separate inode. Failed-commit rollback uses hardlink backups when
+  the workspace and state filesystems allow it.
+- Commit backups are retained until the restored host manifest and journal
+  phase, or the committed session record and cleared active pointer, have been
+  persisted. Recovery refuses to overwrite externally edited paths and keeps
+  its backup material for inspection. This is a process-interruption guarantee,
+  not a power-loss or storage-failure guarantee.
+- Only `user.*` xattrs are preserved. Non-user xattr namespaces are kernel or
+  security-managed and are left untouched.
 - `.git` is never committed, even with `--include-excluded`. Device nodes,
   FIFOs, and sockets are refused. setuid/setgid bits are cleared on commit.
 - cowbox never silently falls back to a full directory copy when the OS CoW
@@ -207,9 +241,9 @@ methodology live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 | --- | --- | --- | --- |
 | Cold OverlayFS mount | 10,000 files | < 5 ms | TBD (pure mount not separately instrumented) |
 | Step freeze | 10,000 files | < 10 ms | TBD (pure freeze not separately instrumented) |
-| Diff scan (10 changed files) | 10,000 files | < 25 ms | 15.35 ms (13.6–17.6 ms) |
-| Rollback (DAG pointer) | 10,000 files | < 5 ms | 11.3 ns (11.1–11.5 ns) |
-| End-to-end `cowbox run -- true` | 10,000 files | no hard target | 40.4 ms (39.0–41.7 ms, includes CLI/namespace/mount) |
+| Diff scan (10 changed files) | 10,000 files | < 25 ms | 13.19 ms (12.96–13.56 ms) |
+| Rollback (DAG pointer) | 10,000 files | < 5 ms | 10.7 ns (10.44–11.01 ns) |
+| End-to-end `cowbox run -- true` | 10,000 files | no hard target | 56.2 ms (51.76–60.88 ms, includes CLI/namespace/mount) |
 
 These are targets, not claims. The measured column is filled after
 `scripts/bench.sh` runs in WSL2 ext4.
@@ -222,7 +256,7 @@ M1 reports Criterion means and ranges; P99 is not separately instrumented yet.
 | --- | --- | --- |
 | **M1** | Linux/WSL2 CLI, snapshot DAG, OverlayFS, Landlock, commit journal, tests, benchmarks | Preview available |
 | **M1.5** | Windows launcher, `setup`, multi-harness skill installer, project rules and policy | Preview available |
-| **M2** | Network policy (seccomp or newer Landlock), cache bind mounts, commit hardening, 200k-file benchmarks | Planned |
+| **M2** | Network policy (seccomp or newer Landlock), cache bind mounts, 200k-file benchmarks, blocked-write auditing | Planned |
 | **M3** | MCP proxy with `cowbox_diff` / `cowbox_rollback` / `cowbox_commit` meta-tools | Planned |
 | **M4** | Native Windows ReFS + Job Object backend, macOS backend, eval suite and public leaderboard | Planned |
 

@@ -5,6 +5,7 @@ use cowbox_dag::SessionDag;
 use fs2::FileExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,6 +18,16 @@ pub enum SessionStatus {
     Active,
     Committed,
     Discarded,
+}
+
+impl SessionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Committed => "committed",
+            Self::Discarded => "discarded",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +85,23 @@ impl SessionStore {
     }
 
     pub fn load_active(&self) -> CliResult<Option<SessionRecord>> {
+        let Some(record) = self.load_active_record_any_status()? else {
+            return Ok(None);
+        };
+        if record.status != SessionStatus::Active {
+            return Err(CliError::new(
+                "STATE_CORRUPTED",
+                format!(
+                    "active pointer references a {:?} session {}",
+                    record.status, record.session_id
+                ),
+            )
+            .hint("run `cowbox commit --recover` or delete the workspace pointer"));
+        }
+        Ok(Some(record))
+    }
+
+    pub fn load_active_record_any_status(&self) -> CliResult<Option<SessionRecord>> {
         if !self.active_path.exists() {
             return Ok(None);
         }
@@ -97,18 +125,7 @@ impl SessionStore {
                 ),
             ));
         }
-        let record = self.load(&pointer.session_id)?;
-        if record.status != SessionStatus::Active {
-            return Err(CliError::new(
-                "STATE_CORRUPTED",
-                format!(
-                    "active pointer references a {:?} session {}",
-                    record.status, record.session_id
-                ),
-            )
-            .hint("run `cowbox discard --yes` or delete the workspace pointer"));
-        }
-        Ok(Some(record))
+        self.load(&pointer.session_id).map(Some)
     }
 
     pub fn load(&self, session_id: &str) -> CliResult<SessionRecord> {
@@ -249,6 +266,158 @@ impl SessionStore {
         fs::remove_dir_all(canonical)?;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GlobalSession {
+    pub session_id: String,
+    pub workspace: Option<PathBuf>,
+    pub status: String,
+    pub active: bool,
+    pub steps: usize,
+    pub rollbacks: u64,
+    pub disk_bytes: u64,
+    pub created_at_unix_ms: Option<i64>,
+    pub updated_at_unix_ms: Option<i64>,
+    pub last_commit_unix_ms: Option<i64>,
+    pub valid: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct SessionInventory {
+    pub sessions: Vec<GlobalSession>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct GlobalSessionStore {
+    sessions_dir: PathBuf,
+    workspaces_dir: PathBuf,
+}
+
+impl GlobalSessionStore {
+    pub fn new(state_root: impl Into<PathBuf>) -> Self {
+        let state_root = state_root.into();
+        Self {
+            sessions_dir: state_root.join("sessions"),
+            workspaces_dir: state_root.join("workspaces"),
+        }
+    }
+
+    pub fn list(&self) -> CliResult<SessionInventory> {
+        let (active_ids, mut warnings) = self.active_pointers()?;
+        let mut sessions = Vec::new();
+        let Ok(entries) = fs::read_dir(&self.sessions_dir) else {
+            return Ok(SessionInventory { sessions, warnings });
+        };
+        for entry in entries {
+            let entry = entry?;
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if !metadata.is_dir() {
+                warnings.push(format!(
+                    "ignoring non-directory session entry {}",
+                    entry.path().display()
+                ));
+                continue;
+            }
+            let session_id = entry.file_name().to_string_lossy().into_owned();
+            let session_dir = entry.path();
+            let disk_bytes = directory_size(&session_dir);
+            let record = read_global_record(&session_dir, &session_id);
+            match record {
+                Ok(record) => sessions.push(GlobalSession {
+                    session_id: session_id.clone(),
+                    workspace: Some(record.workspace),
+                    status: record.status.as_str().to_string(),
+                    active: active_ids.contains(&session_id),
+                    steps: record.dag.nodes.len().saturating_sub(1),
+                    rollbacks: record.rollback_count,
+                    disk_bytes,
+                    created_at_unix_ms: Some(record.created_at_unix_ms),
+                    updated_at_unix_ms: Some(record.updated_at_unix_ms),
+                    last_commit_unix_ms: record.last_commit_unix_ms,
+                    valid: true,
+                    error: None,
+                }),
+                Err(error) => sessions.push(GlobalSession {
+                    session_id,
+                    workspace: None,
+                    status: "invalid".to_string(),
+                    active: false,
+                    steps: 0,
+                    rollbacks: 0,
+                    disk_bytes,
+                    created_at_unix_ms: None,
+                    updated_at_unix_ms: None,
+                    last_commit_unix_ms: None,
+                    valid: false,
+                    error: Some(error.message),
+                }),
+            }
+        }
+        sessions.sort_by(|left, right| {
+            right
+                .updated_at_unix_ms
+                .cmp(&left.updated_at_unix_ms)
+                .then_with(|| left.session_id.cmp(&right.session_id))
+        });
+        Ok(SessionInventory { sessions, warnings })
+    }
+
+    fn active_pointers(&self) -> CliResult<(BTreeSet<String>, Vec<String>)> {
+        let mut active = BTreeSet::new();
+        let mut warnings = Vec::new();
+        let Ok(entries) = fs::read_dir(&self.workspaces_dir) else {
+            return Ok((active, warnings));
+        };
+        for entry in entries {
+            let entry = entry?;
+            if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            match read_json::<ActivePointer>(&entry.path()) {
+                Ok(pointer) if pointer.schema_version == 1 => {
+                    active.insert(pointer.session_id);
+                }
+                Ok(pointer) => warnings.push(format!(
+                    "active pointer {} has unsupported schema {}",
+                    entry.path().display(),
+                    pointer.schema_version
+                )),
+                Err(error) => warnings.push(format!(
+                    "cannot read active pointer {}: {}",
+                    entry.path().display(),
+                    error.message
+                )),
+            }
+        }
+        Ok((active, warnings))
+    }
+}
+
+fn read_global_record(session_dir: &Path, session_id: &str) -> CliResult<SessionRecord> {
+    let path = session_dir.join("session.json");
+    let record: SessionRecord = read_json(&path)?;
+    if record.schema_version != SESSION_SCHEMA_VERSION {
+        return Err(CliError::new(
+            "STATE_CORRUPTED",
+            format!(
+                "session {} has unsupported schema {}",
+                session_id, record.schema_version
+            ),
+        ));
+    }
+    if record.session_id != session_id {
+        return Err(CliError::new(
+            "STATE_CORRUPTED",
+            format!(
+                "session directory {} contains id {}",
+                session_id, record.session_id
+            ),
+        ));
+    }
+    Ok(record)
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> CliResult<T> {

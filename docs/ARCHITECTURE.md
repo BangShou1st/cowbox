@@ -96,7 +96,7 @@ It must be outside the workspace and on an xattr-capable Linux filesystem.
         ├── cache/                       # redirected caches
         ├── events.jsonl                 # run/rollback/commit/discard audit
         ├── lock                         # flock for workspace mutation
-        └── commit/<journal>/            # backups + operation manifest
+        └── commit/<journal>/            # phase meta, ops, copy + link backups
 ```
 
 A session is `Active`, `Committed`, or `Discarded`. Only one active session is
@@ -189,17 +189,43 @@ Text line counts are optional and capped by `max_line_stat_files` and
 1. Compute the net diff from base to the target step.
 2. Compare every affected host path with the base manifest. If the host
    changed, return `CommitConflict`; `--force` overrides but still backs up.
-3. Copy every affected existing host path into a commit journal and write an
-   operation manifest.
+3. Create a `prepared` journal, copy every affected existing host path into it,
+   record pre/post fingerprints, and write an operation manifest. Existing host
+   files also get an original-inode hardlink backup when the filesystem allows
+   it; the independent copy is the stable recovery source.
 4. Apply in topological order:
    - delete removed paths, deepest first;
    - create directories, shallowest first;
-   - write regular files to same-directory temporary files, fsync, rename;
+   - write regular files to same-directory temporary files, fsync, apply
+     `user.*` xattrs, rename;
+   - preserve hardlinks among files in the same commit set;
    - recreate or replace symlinks last.
-5. Strip setuid/setgid, preserve mode and mtime where possible, and refuse
+5. Keep SQLite `-wal`/`-shm`/`-journal` sidecars grouped with a changed
+   database and delete stale host sidecars that are not present in an upper
+   layer.
+6. Strip setuid/setgid, preserve mode and mtime where possible, and refuse
    device/FIFO/socket entries.
-6. On any failure, restore from the journal. If restoration itself fails, keep
-   the journal and print its path for manual recovery.
+7. Persist the `applied` phase only after every host write and fsync has
+   succeeded. This is the durable commit point.
+8. Save the committed session record and clear the active pointer. Only then
+   mark the journal `complete` and remove its backup material.
+
+If applying fails before the commit point, the journal moves to `restoring`,
+restores the host, refreshes the base manifest, and records `rolled_back` while
+keeping backups until those writes are durable. A process interruption at any
+point leaves either an incomplete journal or a terminal one. `commit --recover`
+checks the recorded operation manifest and pre/post fingerprints:
+
+- `prepared`, `applying`, or `restoring`: restore the host and keep the original
+  session active;
+- `applied`: leave the committed host content in place, persist the committed
+  session state, clear the active pointer, then finalize the journal;
+- `complete` or `rolled_back`: no further host action; repeated recovery is a
+  no-op.
+
+External edits cause recovery to stop with an explicit error and retain the
+journal and backups. The guarantee covers process interruption, not power loss
+or storage failure.
 
 `.git` and `.cowbox` are never committed. Default excluded paths such as
 `target/`, `node_modules/`, and `.venv/` are ignored unless

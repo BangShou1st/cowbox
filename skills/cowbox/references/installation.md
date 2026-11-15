@@ -7,9 +7,10 @@
    `%USERPROFILE%\.local\bin`. It does not install skills.
 3. Add `%USERPROFILE%\.local\bin` to `PATH` if `cowbox` is not found.
 4. Run `cowbox doctor`.
-5. Run `cowbox install-skill --list`, then install the harness you use:
+5. Run `cowbox demo` to verify rollback end to end.
+6. Run `cowbox install-skill --list`, then install the harness you use:
    `cowbox install-skill --harness codex` (or `--all`).
-6. In each project, run `cowbox init --agent` to write project rules.
+7. In each project, run `cowbox init --agent` to write project rules.
 
 ## Linux/WSL
 

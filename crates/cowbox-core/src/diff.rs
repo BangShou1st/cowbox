@@ -19,6 +19,7 @@ struct LayerEntry {
     size: u64,
     symlink_target: Option<PathBuf>,
     source_path: PathBuf,
+    xattr_digest: Option<String>,
 }
 
 impl LayerEntry {
@@ -29,12 +30,18 @@ impl LayerEntry {
         } else {
             None
         };
+        let xattr_digest = if matches!(kind, EntryKind::File | EntryKind::Directory) {
+            Some(crate::xattr::digest_checked(path)?)
+        } else {
+            None
+        };
         Ok(Self {
             kind,
             mode: metadata.mode() & 0o7777,
             size: metadata.len(),
             symlink_target,
             source_path: path.to_path_buf(),
+            xattr_digest,
         })
     }
 }
@@ -143,6 +150,7 @@ pub fn compute_diff(
                             let host_path = layout.workspace.join(rel_path);
                             if files_equal(&host_path, &entry.source_path)
                                 && entry.mode == base_entry.mode
+                                && xattrs_match(entry, base_entry)
                             {
                                 continue;
                             }
@@ -163,7 +171,12 @@ pub fn compute_diff(
                                 0,
                             )
                         }
-                        EntryKind::Directory => continue,
+                        EntryKind::Directory => {
+                            if xattrs_match(entry, base_entry) {
+                                continue;
+                            }
+                            (ChangeKind::Modified, 0)
+                        }
                         EntryKind::Other => (
                             ChangeKind::Modified,
                             i64::try_from(entry.size).unwrap_or(i64::MAX)
@@ -318,6 +331,13 @@ fn files_equal(left: &Path, right: &Path) -> bool {
         return false;
     };
     hash_reader(left_file) == hash_reader(right_file)
+}
+
+fn xattrs_match(entry: &LayerEntry, base_entry: &ManifestEntry) -> bool {
+    match (&entry.xattr_digest, &base_entry.xattr_digest) {
+        (Some(current), Some(base)) => current == base,
+        _ => true,
+    }
 }
 
 fn hash_reader(mut reader: fs::File) -> String {

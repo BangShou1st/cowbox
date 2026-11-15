@@ -15,6 +15,8 @@ pub enum CoreError {
     CommitConflict(Vec<PathBuf>),
     #[error("commit failed: {0}")]
     CommitFailed(String),
+    #[error("commit recovery required for journal {0}")]
+    CommitRecoveryRequired(PathBuf),
     #[error("command timed out after {0:?}")]
     Timeout(Duration),
     #[error("invalid configuration: {0}")]

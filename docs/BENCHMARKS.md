@@ -14,7 +14,7 @@ Kernel:      6.6.87.2-microsoft-standard-WSL2
 Filesystem:  ext4 for state and fixtures; /mnt/e is 9p and is not a benchmark target
 CPU:         Intel(R) Core(TM) i9-14900HX, 8 vCPU visible to WSL2
 Memory:      1.9 GiB visible to WSL2
-Rust:        1.100.0 (2026-11-09)
+Rust:        1.100.0 (2026-11-05)
 Measured:    2026-11-15
 ```
 
@@ -57,9 +57,9 @@ COWBOX_BENCH_FILES=10000 cargo bench -p cowbox-core --bench engine -- --sample-s
 
 | Benchmark | 1k files | 10k files | 200k files |
 | --- | ---: | ---: | ---: |
-| `run_true_end_to_end` | 45.8 ms | 40.4 ms | TBD |
-| `diff_scan` | 1.01 ms | 15.35 ms | TBD |
-| `rollback_dag` | 10.8 ns | 11.3 ns | TBD |
+| `run_true_end_to_end` | 43.5 ms | 56.2 ms | TBD |
+| `diff_scan` | 1.26 ms | 13.19 ms | TBD |
+| `rollback_dag` | 11.3 ns | 10.7 ns | TBD |
 | `mount_cold` | TBD | TBD | TBD |
 | `step_freeze` | TBD | TBD | TBD |
 
@@ -67,13 +67,15 @@ Criterion reported these ranges in the same runs:
 
 | Benchmark | 1k range | 10k range |
 | --- | ---: | ---: |
-| `run_true_end_to_end` | 41.9–49.5 ms | 39.0–41.7 ms |
-| `diff_scan` | 1.00–1.01 ms | 13.6–17.6 ms |
-| `rollback_dag` | 10.7–10.9 ns | 11.1–11.5 ns |
+| `run_true_end_to_end` | 41.857–45.528 ms | 51.764–60.876 ms |
+| `diff_scan` | 1.233–1.280 ms | 12.957–13.558 ms |
+| `rollback_dag` | 11.185–11.625 ns | 10.438–11.011 ns |
 
-The 1k and 10k end-to-end numbers overlap because process, helper, and mount
-noise dominates at these fixture sizes. Treat the end-to-end number as a range,
-not a precise constant.
+Process, helper, and mount noise still dominates the end-to-end benchmark.
+Treat the end-to-end number as a range, not a precise constant. These values
+were measured after the commit-recovery changes, but the benchmark does not
+exercise the commit path and does not isolate a single cause for run-to-run
+variation.
 
 ## Known issues observed during measurement
 
@@ -86,6 +88,9 @@ not a precise constant.
   first run confirms the local kernel uses a `0/0` character-device whiteout.
 - `blocked_writes` is reported as not instrumented; Landlock denies writes but
   does not emit an audit event in M1.
+- Base manifest capture now records inode, link count, and `user.*` xattr
+  digests. `run_true` does not include manifest capture because `init` is set
+  up outside the timed loop; init cost is not separately benchmarked yet.
 
 ## How to run
 

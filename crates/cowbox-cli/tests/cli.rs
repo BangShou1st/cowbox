@@ -95,3 +95,68 @@ fn discard_without_session_is_a_noop() {
     assert_eq!(value["ok"], true);
     assert_eq!(value["data"]["discarded"], false);
 }
+
+#[test]
+#[cfg(not(windows))]
+fn sessions_report_invalid_state_and_gc_skips_it() {
+    let dir = workspace();
+    let state = tempfile::tempdir().expect("state");
+    let invalid_session = state.path().join("sessions").join("bad-id");
+    std::fs::create_dir_all(&invalid_session).expect("invalid session dir");
+    std::fs::write(invalid_session.join("session.json"), "{not json").expect("invalid session");
+
+    let output = cowbox()
+        .current_dir(dir.path())
+        .env("COWBOX_HOME", state.path())
+        .args(["sessions", "--json"])
+        .output()
+        .expect("run sessions");
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("sessions json");
+    let session = &value["data"]["sessions"][0];
+    assert_eq!(session["session_id"].as_str(), Some("bad-id"));
+    assert_eq!(session["status"].as_str(), Some("invalid"));
+    assert_eq!(session["valid"].as_bool(), Some(false));
+
+    let output = cowbox()
+        .current_dir(dir.path())
+        .env("COWBOX_HOME", state.path())
+        .args(["gc", "--all", "--yes", "--json"])
+        .output()
+        .expect("run gc");
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("gc json");
+    assert_eq!(value["data"]["removed"].as_array().map(Vec::len), Some(0));
+    assert_eq!(value["data"]["skipped_invalid"].as_u64(), Some(1));
+    assert!(invalid_session.is_dir());
+}
+
+#[test]
+#[cfg(not(windows))]
+fn sessions_warn_and_gc_refuses_when_active_pointer_is_invalid() {
+    let dir = workspace();
+    let state = tempfile::tempdir().expect("state");
+    let workspaces = state.path().join("workspaces");
+    std::fs::create_dir_all(&workspaces).expect("workspaces dir");
+    std::fs::write(workspaces.join("broken.json"), "{not json").expect("broken pointer");
+
+    let output = cowbox()
+        .current_dir(dir.path())
+        .env("COWBOX_HOME", state.path())
+        .args(["sessions", "--json"])
+        .output()
+        .expect("run sessions");
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("sessions json");
+    assert_eq!(value["data"]["warnings"].as_array().map(Vec::len), Some(1));
+
+    let output = cowbox()
+        .current_dir(dir.path())
+        .env("COWBOX_HOME", state.path())
+        .args(["gc", "--all", "--yes", "--json"])
+        .output()
+        .expect("run gc");
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("gc json");
+    assert_eq!(value["error"]["code"].as_str(), Some("STATE_CORRUPTED"));
+}
