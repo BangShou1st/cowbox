@@ -189,7 +189,7 @@ These are targets, not claims. The measured column is filled after
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
-| **M1** | Linux/WSL2 CLI, snapshot DAG, OverlayFS, Landlock, commit journal, tests, benchmarks | In progress |
+| **M1** | Linux/WSL2 CLI, snapshot DAG, OverlayFS, Landlock, commit journal, tests, benchmarks | Preview available |
 | **M2** | Network policy (seccomp or newer Landlock), cache bind mounts, commit hardening, 200k-file benchmarks | Planned |
 | **M3** | MCP proxy with `cowbox_diff` / `cowbox_rollback` / `cowbox_commit` meta-tools, `cowbox.exe` WSL bridge for Codex Desktop | Planned |
 | **M4** | Native Windows ReFS + Job Object backend, macOS backend, eval suite and public leaderboard | Planned |

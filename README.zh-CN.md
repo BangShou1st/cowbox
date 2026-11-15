@@ -172,7 +172,7 @@ cowbox rollback 0
 
 | 里程碑 | 范围 | 状态 |
 | --- | --- | --- |
-| **M1** | Linux/WSL2 CLI、快照 DAG、OverlayFS、Landlock、commit journal、测试、基准 | 进行中 |
+| **M1** | Linux/WSL2 CLI、快照 DAG、OverlayFS、Landlock、commit journal、测试、基准 | 预览可用 |
 | **M2** | 网络策略（seccomp 或更新 Landlock）、缓存 bind mount、commit 加固、20 万文件基准 | 计划中 |
 | **M3** | MCP 代理（`cowbox_diff` / `cowbox_rollback` / `cowbox_commit`）、Codex Desktop 的 `cowbox.exe` WSL 桥 | 计划中 |
 | **M4** | Windows 原生 ReFS + Job Object 后端、macOS 后端、Eval 套件与公开榜单 | 计划中 |

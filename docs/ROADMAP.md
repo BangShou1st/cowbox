@@ -5,19 +5,22 @@ measurable first, then add agent protocol integration, then native platforms.
 
 ## M1: Linux/WSL2 engine preview
 
-Status: in progress.
+Status: preview available (2026-11-15). The public repository and CI are live.
 
 - [x] Cargo workspace and public interfaces.
-- [ ] Snapshot DAG with rollback, undo, branching, and serialization.
-- [ ] Unprivileged OverlayFS with `userxattr` and multi-layer lowerdirs.
-- [ ] Landlock path fencing and environment sanitization.
-- [ ] PID 1 supervisor, orphan reaping, and timeouts.
-- [ ] Whiteout-aware diff (char device and xattr forms).
-- [ ] Commit journal, host-drift detection, and atomic write order.
-- [ ] `init`, `run`, `diff`, `log`, `rollback`, `undo`, `commit`, `discard`,
+- [x] Snapshot DAG with rollback, undo, branching, and serialization.
+- [x] Unprivileged OverlayFS with `userxattr` and multi-layer lowerdirs.
+- [x] Landlock path fencing and environment sanitization.
+- [x] PID 1 supervisor, orphan reaping, and timeouts.
+- [x] Whiteout-aware diff (char device and xattr forms).
+- [x] Commit journal, host-drift detection, and atomic write order.
+- [x] `init`, `run`, `diff`, `log`, `rollback`, `undo`, `commit`, `discard`,
   `doctor`, and `stats`.
-- [ ] 10k-file adversarial suite, 9p smoke, and Criterion benchmarks.
-- [ ] CI on Ubuntu 22.04/24.04 and a public M1 repository.
+- [x] 10k-file adversarial suite, 9p smoke, and Criterion benchmarks.
+- [x] CI on Ubuntu 22.04/24.04 and a public M1 repository.
+
+M1 supports up to 150 active layers per session. Longer sessions must commit or
+discard and start a new one; layer compaction is an M2 item.
 
 Explicitly excluded from M1: MCP proxy, native Windows, macOS, network
 isolation, multi-agent racing, and the eval leaderboard.
