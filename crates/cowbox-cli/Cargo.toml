@@ -32,7 +32,7 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 tempfile.workspace = true
 
 [lints]
