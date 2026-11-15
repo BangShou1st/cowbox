@@ -74,6 +74,17 @@ impl From<cowbox_core::CoreError> for CliError {
             .hint("inspect the listed paths, then retry with --force if they should be overwritten")
             .exit(2),
             CoreError::CommitFailed(reason) => CliError::new("COMMIT_FAILED", reason),
+            CoreError::CommitRecoveryRequired(journal) => CliError::new(
+                "COMMIT_RECOVERY_REQUIRED",
+                format!(
+                    "an interrupted commit journal needs recovery: {}",
+                    journal.display()
+                ),
+            )
+            .hint(
+                "run `cowbox commit --recover`; it restores the host before the commit point or finalizes an already-applied commit",
+            )
+            .exit(2),
             CoreError::Timeout(duration) => {
                 CliError::new("TIMEOUT", format!("command timed out after {duration:?}")).exit(124)
             }

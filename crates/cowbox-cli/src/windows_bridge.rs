@@ -4,7 +4,7 @@ use crate::error::{CliError, CliResult};
 use crate::json;
 use crate::setup;
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::process::Command;
 
 pub fn delegate_if_needed(command: &CliCommand) -> Option<CliResult<i32>> {
@@ -15,8 +15,11 @@ pub fn delegate_if_needed(command: &CliCommand) -> Option<CliResult<i32>> {
         | CliCommand::Rollback(_)
         | CliCommand::Undo(_)
         | CliCommand::Commit(_)
+        | CliCommand::Demo(_)
         | CliCommand::Discard(_)
-        | CliCommand::Stats(_) => Some(delegate()),
+        | CliCommand::Sessions(_)
+        | CliCommand::Gc(_)
+        | CliCommand::Stats(_) => Some(delegate(command)),
         CliCommand::SandboxExec(_) | CliCommand::Supervisor(_) => Some(Err(CliError::new(
             "INTERNAL_COMMAND",
             "internal commands are only valid inside WSL",
@@ -33,21 +36,35 @@ pub fn delegate_if_needed(command: &CliCommand) -> Option<CliResult<i32>> {
     }
 }
 
-fn delegate() -> CliResult<i32> {
+fn delegate(command: &CliCommand) -> CliResult<i32> {
     let config = load_global()?;
     let distro = config.wsl.distro.clone();
     let linux_binary = resolve_linux_binary(&distro, &config.wsl)?;
+    let interactive = needs_terminal(command);
     let cwd = std::env::current_dir()?;
     let cwd_text = cwd.to_string_lossy().to_string();
     let args = std::env::args_os().skip(1).collect::<Vec<OsString>>();
 
-    let mut command = Command::new("wsl.exe");
-    command
+    let mut wsl_command = Command::new("wsl.exe");
+    wsl_command
         .args(["-d", &distro, "--cd", &cwd_text, "--exec", "bash", "-lc"])
         .arg("exec \"$0\" \"$@\"")
         .arg(&linux_binary)
         .args(args);
-    let output = command.output().map_err(|error| {
+    if interactive {
+        return wsl_command
+            .status()
+            .map(|status| status.code().unwrap_or(1))
+            .map_err(|error| {
+                CliError::new(
+                    "WSL_NOT_FOUND",
+                    format!("cannot run cowbox through WSL: {error}"),
+                )
+                .hint("run `cowbox setup` first")
+            });
+    }
+
+    let output = wsl_command.output().map_err(|error| {
         CliError::new(
             "WSL_NOT_FOUND",
             format!("cannot run cowbox through WSL: {error}"),
@@ -60,6 +77,16 @@ fn delegate() -> CliResult<i32> {
         std::io::stderr().write_all(stderr.as_bytes())?;
     }
     Ok(output.status.code().unwrap_or(1))
+}
+
+fn needs_terminal(command: &CliCommand) -> bool {
+    let prompts = match command {
+        CliCommand::Commit(args) => !args.yes && !args.dry_run,
+        CliCommand::Gc(args) => !args.yes && !args.dry_run,
+        CliCommand::Discard(args) => !args.yes,
+        _ => false,
+    };
+    prompts && std::io::stdin().is_terminal()
 }
 
 fn resolve_linux_binary(distro: &str, wsl: &WslConfig) -> CliResult<String> {

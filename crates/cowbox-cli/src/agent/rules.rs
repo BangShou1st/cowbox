@@ -52,10 +52,9 @@ Use cowbox only when the user explicitly asks for it, or when the task involves
 one of these risk triggers:
 
 - destructive shell commands (`rm -rf`, `git reset --hard`, bulk delete);
-- database migrations or destructive local database changes;
+- local file-backed database migrations or destructive database changes;
 - dependency installation or major upgrades;
-- refactors touching more than five files;
-- running an untrusted script, MCP tool, or generated migration.
+- refactors touching more than five files.
 
 Before starting, run `cowbox policy --json`. Follow its `mode`:
 
@@ -70,7 +69,16 @@ the project into WSL. On Linux/WSL use `cowbox` directly.
 If a step fails, inspect `cowbox diff` and `cowbox log`, then `cowbox rollback
 <step>` instead of stacking fixes on a broken workspace. `cowbox commit` is a
 host write and requires explicit human approval. Do not edit the host workspace
-while a cowbox session is active.
+while a cowbox session is active. After approval, run `cowbox commit --yes`;
+non-interactive calls without `--yes` are refused.
+If commit reports `COMMIT_RECOVERY_REQUIRED`, stop editing and run
+`cowbox commit --recover --yes`. It restores the host before the durable commit
+point or finalizes an already-applied commit; do not force recovery over
+reported host drift.
+
+cowbox protects local workspace files. It does not isolate the network, reverse
+remote database/service changes, or prevent readable files from leaving the
+machine.
 
 This policy protects commands routed through cowbox. Codex Desktop's built-in
 file editor is outside this boundary until the native Windows backend lands.

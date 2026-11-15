@@ -9,5 +9,5 @@ such as `E:\project\app`; `cowbox.exe` invokes the Linux binary through
 - SQLite and heavy small-file workloads can behave differently over 9p; run a
   small `cowbox run -- true` and `doctor` before a large migration.
 - Native Windows file-edit interception is not part of M1.5. Codex Desktop's
-  built-in editor still bypasses the WSL sandbox; use Codex CLI inside
-  `cowbox run -- codex`, or wait for the native Windows backend.
+  built-in editor still bypasses the WSL sandbox; only commands routed through
+  cowbox are protected until the native Windows backend lands.

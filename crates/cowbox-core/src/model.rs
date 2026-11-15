@@ -138,3 +138,27 @@ pub struct CommitReport {
     pub conflicts: Vec<PathBuf>,
     pub journal: Option<PathBuf>,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitRecoveryAction {
+    RestoreHost,
+    FinalizeCommit,
+    AlreadyFinalized,
+    AlreadyRolledBack,
+    NoJournal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingRecovery {
+    pub journal: PathBuf,
+    pub action: CommitRecoveryAction,
+    pub target_step: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecoveryReport {
+    pub journal: Option<PathBuf>,
+    pub action: CommitRecoveryAction,
+    pub restored: usize,
+}

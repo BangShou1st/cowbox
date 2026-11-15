@@ -1,22 +1,24 @@
 use crate::agent::{config as agent_config, harness, policy, rules, skill};
 use crate::cli::{
-    CliCommand, CommitArgs, DiffArgs, DiscardArgs, DoctorArgs, HiddenArgs, InitArgs,
-    InstallRulesArgs, InstallSkillArgs, LogArgs, PathArgs, PolicyArgs, RollbackArgs, RunArgs,
-    SetupArgs, StatsArgs, UndoArgs, UpdateArgs,
+    CliCommand, CommitArgs, DemoArgs, DiffArgs, DiscardArgs, DoctorArgs, GcArgs, HiddenArgs,
+    InitArgs, InstallRulesArgs, InstallSkillArgs, LogArgs, PathArgs, PolicyArgs, RollbackArgs,
+    RunArgs, SessionsArgs, SetupArgs, StatsArgs, UndoArgs, UpdateArgs,
 };
 use crate::config::{Config, RunPolicyOverrides};
 use crate::error::{CliError, CliResult};
 use crate::json;
 use crate::render::{self, Stats};
 use crate::setup;
-use crate::state::{SessionRecord, SessionStatus, SessionStore};
+use crate::state::{GlobalSession, GlobalSessionStore, SessionRecord, SessionStatus, SessionStore};
 use crate::workspace;
-use cowbox_core::{SandboxBackend, SessionLayout};
+use cowbox_core::{CommitRecoveryAction, PendingRecovery, SandboxBackend, SessionLayout};
 use cowbox_dag::{BASE_STEP, StepNode};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{BufRead, IsTerminal};
 use std::path::PathBuf;
+use std::time::Duration;
 
 struct Context {
     workspace: PathBuf,
@@ -39,8 +41,11 @@ pub fn dispatch(command: &CliCommand) -> CliResult<i32> {
         CliCommand::Rollback(args) => command_rollback(args),
         CliCommand::Undo(args) => command_undo(args),
         CliCommand::Commit(args) => command_commit(args),
+        CliCommand::Demo(args) => command_demo(args),
         CliCommand::Discard(args) => command_discard(args),
         CliCommand::Doctor(args) => command_doctor(args),
+        CliCommand::Sessions(args) => command_sessions(args),
+        CliCommand::Gc(args) => command_gc(args),
         CliCommand::Stats(args) => command_stats(args),
         CliCommand::Setup(args) => command_setup(args),
         CliCommand::InstallSkill(args) => command_install_skill(args),
@@ -252,6 +257,7 @@ fn command_rollback(args: &RollbackArgs) -> CliResult<i32> {
     let ctx = setup()?;
     let _lock = ctx.store.lock()?;
     let mut record = active_record(&ctx)?;
+    ensure_no_pending_commit(&ctx, &record)?;
     let previous = record.dag.head_step;
     record.dag.rollback(args.step)?;
     record.rollback_count += u64::from(previous != record.dag.head_step);
@@ -280,6 +286,7 @@ fn command_undo(args: &UndoArgs) -> CliResult<i32> {
     let ctx = setup()?;
     let _lock = ctx.store.lock()?;
     let mut record = active_record(&ctx)?;
+    ensure_no_pending_commit(&ctx, &record)?;
     let previous = record.dag.head_step;
     let target = record.dag.undo(args.steps)?;
     record.rollback_count += u64::from(previous != target);
@@ -304,7 +311,11 @@ fn command_undo(args: &UndoArgs) -> CliResult<i32> {
 fn command_commit(args: &CommitArgs) -> CliResult<i32> {
     let ctx = setup()?;
     let _lock = ctx.store.lock()?;
+    if args.recover {
+        return command_commit_recover(&ctx, args);
+    }
     let mut record = active_record(&ctx)?;
+    ensure_no_pending_commit(&ctx, &record)?;
     let target = args.step.unwrap_or(record.dag.head_step);
     if !record.dag.nodes.contains_key(&target) {
         return Err(CliError::new(
@@ -313,10 +324,81 @@ fn command_commit(args: &CommitArgs) -> CliResult<i32> {
         ));
     }
     let chain = target_chain(&record, target)?;
+    let preview_options = ctx
+        .config
+        .to_commit_options(args.force, true, args.include_excluded);
+    let layout = ctx.store.layout(&record.session_id);
+    let preview = backend().commit_layers(&layout, &chain, &preview_options)?;
+    if !preview.conflicts.is_empty() && !preview_options.force {
+        let paths = preview
+            .conflicts
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(CliError::new(
+            "COMMIT_CONFLICT",
+            format!("host workspace changed since the session started: {paths}"),
+        )
+        .hint("inspect the paths, then retry with --force if they should be overwritten")
+        .exit(2));
+    }
+
+    if args.dry_run {
+        let summary = render::summarize(&preview.changes);
+        if args.json {
+            json::print(&json::ok(
+                "commit",
+                Some(&record),
+                json!({
+                    "dry_run": true,
+                    "committed": false,
+                    "changes": preview.changes,
+                    "conflicts": preview.conflicts,
+                    "summary": render::summary_json(&summary),
+                }),
+            ))?;
+        } else {
+            println!(
+                "dry-run: {} change(s), {} conflict(s); nothing written",
+                preview.changes.len(),
+                preview.conflicts.len()
+            );
+        }
+        return Ok(0);
+    }
+
+    if !args.yes && !preview.changes.is_empty() {
+        if !std::io::stdin().is_terminal() {
+            return Err(CliError::new(
+                "CONFIRMATION_REQUIRED",
+                "commit requires explicit approval; stdin is not a terminal",
+            )
+            .hint("review the diff, then run `cowbox commit --yes` after human approval")
+            .exit(2));
+        }
+        if !confirm_commit(&ctx.workspace, &preview.changes)? {
+            if args.json {
+                json::print(&json::ok(
+                    "commit",
+                    Some(&record),
+                    json!({
+                        "committed": false,
+                        "cancelled": true,
+                        "changes": preview.changes,
+                        "conflicts": preview.conflicts,
+                    }),
+                ))?;
+            } else {
+                println!("commit cancelled; active session left unchanged");
+            }
+            return Ok(0);
+        }
+    }
+
     let options = ctx
         .config
-        .to_commit_options(args.force, args.dry_run, args.include_excluded);
-    let layout = ctx.store.layout(&record.session_id);
+        .to_commit_options(args.force, false, args.include_excluded);
     let report = backend().commit_layers(&layout, &chain, &options)?;
     if !report.conflicts.is_empty() && !options.force {
         let paths = report
@@ -332,41 +414,9 @@ fn command_commit(args: &CommitArgs) -> CliResult<i32> {
         .hint("inspect the paths, then retry with --force if they should be overwritten")
         .exit(2));
     }
-
-    if args.dry_run {
-        let summary = render::summarize(&report.changes);
-        if args.json {
-            json::print(&json::ok(
-                "commit",
-                Some(&record),
-                json!({
-                    "dry_run": true,
-                    "committed": false,
-                    "changes": report.changes,
-                    "conflicts": report.conflicts,
-                    "summary": render::summary_json(&summary),
-                }),
-            ))?;
-        } else {
-            println!(
-                "dry-run: {} change(s), {} conflict(s); nothing written",
-                report.changes.len(),
-                report.conflicts.len()
-            );
-        }
-        return Ok(0);
-    }
-
     if report.committed {
-        record.status = SessionStatus::Committed;
-        record.last_commit_unix_ms = Some(workspace::now_ms());
-        record.updated_at_unix_ms = workspace::now_ms();
-        ctx.store.save(&record)?;
-        ctx.store.clear_active()?;
-        ctx.store.append_event(
-            &record.session_id,
-            &json!({"event":"commit","ts":workspace::now_ms(),"step":target}),
-        )?;
+        let journal = report.journal.clone();
+        finish_committed_session(&ctx, &mut record, target, journal.as_deref(), false)?;
     }
 
     if args.json {
@@ -394,6 +444,322 @@ fn command_commit(args: &CommitArgs) -> CliResult<i32> {
     Ok(0)
 }
 
+fn command_commit_recover(ctx: &Context, args: &CommitArgs) -> CliResult<i32> {
+    let Some((mut record, pending)) = find_pending_recovery(ctx)? else {
+        if args.json {
+            json::print(&json::ok(
+                "commit",
+                None,
+                json!({
+                    "recovered": false,
+                    "action": CommitRecoveryAction::NoJournal,
+                    "already_complete": true,
+                }),
+            ))?;
+        } else {
+            println!("no interrupted commit to recover");
+        }
+        return Ok(0);
+    };
+    if !args.yes {
+        if !std::io::stdin().is_terminal() {
+            return Err(CliError::new(
+                "CONFIRMATION_REQUIRED",
+                "commit recovery requires --yes when stdin is not a terminal",
+            )
+            .hint("inspect the journal, then run `cowbox commit --recover --yes`")
+            .exit(2));
+        }
+        if !confirm_recovery(&ctx.workspace, &record.session_id, &pending)? {
+            if args.json {
+                json::print(&json::ok(
+                    "commit",
+                    Some(&record),
+                    json!({
+                        "recovered": false,
+                        "cancelled": true,
+                        "action": pending.action,
+                        "journal": pending.journal,
+                    }),
+                ))?;
+            } else {
+                println!("recovery cancelled; journal left unchanged");
+            }
+            return Ok(0);
+        }
+    }
+
+    let layout = ctx.store.layout(&record.session_id);
+    let report = backend().recover_commit(&layout)?;
+    match report.action {
+        CommitRecoveryAction::RestoreHost | CommitRecoveryAction::AlreadyRolledBack => {
+            ensure_recovered_session_active(ctx, &record)?;
+            ctx.store.append_event(
+                &record.session_id,
+                &json!({
+                    "event": "commit_recovered",
+                    "ts": workspace::now_ms(),
+                    "action": report.action,
+                    "journal": report.journal,
+                }),
+            )?;
+        }
+        CommitRecoveryAction::FinalizeCommit | CommitRecoveryAction::AlreadyFinalized => {
+            let target = pending.target_step.unwrap_or(record.dag.head_step);
+            finish_committed_session(ctx, &mut record, target, report.journal.as_deref(), true)?;
+        }
+        CommitRecoveryAction::NoJournal => {}
+    }
+
+    if args.json {
+        json::print(&json::ok(
+            "commit",
+            Some(&record),
+            json!({
+                "recovered": true,
+                "action": report.action,
+                "journal": report.journal,
+                "restored": report.restored,
+            }),
+        ))?;
+    } else {
+        match report.action {
+            CommitRecoveryAction::RestoreHost => println!(
+                "restored {} path(s) from journal {}; session remains active",
+                report.restored,
+                report
+                    .journal
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            CommitRecoveryAction::FinalizeCommit | CommitRecoveryAction::AlreadyFinalized => {
+                println!(
+                    "commit was already applied; finalized session {} and removed its recovery journal",
+                    record.session_id
+                )
+            }
+            CommitRecoveryAction::AlreadyRolledBack => {
+                println!("commit had already been rolled back; session remains active")
+            }
+            CommitRecoveryAction::NoJournal => println!("nothing to recover"),
+        }
+    }
+    Ok(0)
+}
+
+fn find_pending_recovery(ctx: &Context) -> CliResult<Option<(SessionRecord, PendingRecovery)>> {
+    let backend = backend();
+    let mut records = BTreeMap::new();
+    if let Some(record) = ctx.store.load_active_record_any_status()? {
+        records.insert(record.session_id.clone(), record);
+    }
+    let inventory = GlobalSessionStore::new(&ctx.state_root).list()?;
+    for session in inventory.sessions {
+        if !session.valid || session.workspace.as_deref() != Some(ctx.workspace.as_path()) {
+            continue;
+        }
+        let record = ctx.store.load(&session.session_id)?;
+        records.insert(record.session_id.clone(), record);
+    }
+    let mut found = Vec::new();
+    for record in records.into_values() {
+        let layout = ctx.store.layout(&record.session_id);
+        if let Some(pending) = backend.inspect_recovery(&layout)? {
+            found.push((record, pending));
+        }
+    }
+    if found.len() > 1 {
+        let sessions = found
+            .iter()
+            .map(|(record, pending)| {
+                format!("{} ({})", record.session_id, pending.journal.display())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(CliError::new(
+            "STATE_CORRUPTED",
+            format!("multiple sessions have interrupted commits: {sessions}"),
+        )
+        .hint("inspect each journal under the state root before recovering manually")
+        .exit(1));
+    }
+    Ok(found.pop())
+}
+
+fn ensure_no_pending_commit(ctx: &Context, record: &SessionRecord) -> CliResult<()> {
+    let layout = ctx.store.layout(&record.session_id);
+    if backend().inspect_recovery(&layout)?.is_some() {
+        return Err(CliError::new(
+            "COMMIT_RECOVERY_REQUIRED",
+            format!(
+                "session {} has an interrupted commit that must be reconciled first",
+                record.session_id
+            ),
+        )
+        .hint(
+            "run `cowbox commit --recover --yes`; it restores the host before the commit point or finalizes an already-applied commit",
+        )
+        .exit(2));
+    }
+    Ok(())
+}
+
+fn ensure_recovered_session_active(ctx: &Context, record: &SessionRecord) -> CliResult<()> {
+    if record.status != SessionStatus::Active {
+        return Err(CliError::new(
+            "STATE_CORRUPTED",
+            format!(
+                "journal requires host restore, but session {} is {:?}",
+                record.session_id, record.status
+            ),
+        )
+        .hint("inspect the session and journal before changing either")
+        .exit(1));
+    }
+    match ctx.store.load_active_record_any_status()? {
+        Some(existing) if existing.session_id == record.session_id => Ok(()),
+        Some(existing) => Err(CliError::new(
+            "SESSION_CONFLICT",
+            format!(
+                "workspace active pointer references {}, expected {}",
+                existing.session_id, record.session_id
+            ),
+        )
+        .exit(2)),
+        None => ctx.store.write_active(record),
+    }
+}
+
+fn finish_committed_session(
+    ctx: &Context,
+    record: &mut SessionRecord,
+    target: u64,
+    journal: Option<&std::path::Path>,
+    recovered: bool,
+) -> CliResult<()> {
+    match record.status {
+        SessionStatus::Active => {
+            record.status = SessionStatus::Committed;
+            record.last_commit_unix_ms = Some(workspace::now_ms());
+            record.updated_at_unix_ms = workspace::now_ms();
+            ctx.store.save(record)?;
+            ctx.store.append_event(
+                &record.session_id,
+                &json!({
+                    "event": "commit",
+                    "ts": workspace::now_ms(),
+                    "step": target,
+                    "recovered": recovered,
+                    "journal": journal,
+                }),
+            )?;
+            test_crash("commit-after-session-save");
+        }
+        SessionStatus::Committed => {}
+        SessionStatus::Discarded => {
+            return Err(CliError::new(
+                "STATE_CORRUPTED",
+                format!(
+                    "session {} was discarded during commit finalization",
+                    record.session_id
+                ),
+            )
+            .exit(1));
+        }
+    }
+    ctx.store.clear_active()?;
+    test_crash("commit-after-active-clear");
+    if let Some(journal) = journal {
+        let layout = ctx.store.layout(&record.session_id);
+        if let Err(error) = backend().finalize_commit(&layout) {
+            let error: CliError = error.into();
+            return Err(CliError::new(
+                "COMMIT_FINALIZE_FAILED",
+                format!(
+                    "commit was applied and the session was marked committed, but journal {} could not be finalized: {}",
+                    journal.display(),
+                    error.message
+                ),
+            )
+            .hint("run `cowbox commit --recover --yes` to finish cleanup; backups were kept")
+            .exit(1));
+        }
+    }
+    Ok(())
+}
+
+fn test_crash(point: &str) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    if std::env::var_os("COWBOX_TEST_CRASH").as_deref() != Some(std::ffi::OsStr::new(point)) {
+        return;
+    }
+    std::process::abort();
+}
+
+fn command_demo(args: &DemoArgs) -> CliResult<i32> {
+    crate::demo::run(args)
+}
+
+fn confirm_commit(
+    workspace: &std::path::Path,
+    changes: &[cowbox_core::FileChange],
+) -> CliResult<bool> {
+    let summary = render::summarize(changes);
+    eprintln!(
+        "About to write {} file(s) to {}: {} added, {} modified, {} deleted.",
+        summary.files,
+        workspace.display(),
+        summary.added,
+        summary.modified,
+        summary.deleted
+    );
+    for change in changes.iter().take(20) {
+        eprintln!("  {}", change.rel_path.display());
+    }
+    if changes.len() > 20 {
+        eprintln!("  ... and {} more", changes.len() - 20);
+    }
+    eprint!("Commit these changes to the host? [y/N] ");
+    std::io::Write::flush(&mut std::io::stderr())?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
+}
+
+fn confirm_recovery(
+    workspace: &std::path::Path,
+    session_id: &str,
+    pending: &PendingRecovery,
+) -> CliResult<bool> {
+    eprintln!(
+        "Session {session_id} in {} has an interrupted commit at journal {}.",
+        workspace.display(),
+        pending.journal.display()
+    );
+    match pending.action {
+        CommitRecoveryAction::RestoreHost => {
+            eprintln!("The commit did not reach its durable commit point.");
+            eprint!("Restore the affected host paths and keep the session active? [y/N] ");
+        }
+        CommitRecoveryAction::FinalizeCommit => {
+            eprintln!("The host already contains the committed content.");
+            eprint!("Keep it, mark the session committed, and remove the journal? [y/N] ");
+        }
+        CommitRecoveryAction::AlreadyFinalized
+        | CommitRecoveryAction::AlreadyRolledBack
+        | CommitRecoveryAction::NoJournal => {
+            eprint!("Finish commit reconciliation? [y/N] ");
+        }
+    }
+    std::io::Write::flush(&mut std::io::stderr())?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
+}
+
 fn command_discard(args: &DiscardArgs) -> CliResult<i32> {
     let ctx = setup()?;
     let _lock = ctx.store.lock()?;
@@ -405,6 +771,7 @@ fn command_discard(args: &DiscardArgs) -> CliResult<i32> {
         }
         return Ok(0);
     };
+    ensure_no_pending_commit(&ctx, &record)?;
     if !args.yes {
         if !std::io::stdin().is_terminal() {
             return Err(CliError::new(
@@ -475,6 +842,322 @@ fn command_doctor(args: &DoctorArgs) -> CliResult<i32> {
         }
         Ok(if ready { 0 } else { 1 })
     }
+}
+
+fn command_sessions(args: &SessionsArgs) -> CliResult<i32> {
+    let state_root = workspace::state_root()?;
+    let inventory = GlobalSessionStore::new(&state_root).list()?;
+    if args.json {
+        json::print(&json::ok(
+            "sessions",
+            None,
+            json!({
+                "state_root": state_root,
+                "sessions": inventory.sessions,
+                "warnings": inventory.warnings,
+            }),
+        ))?;
+    } else {
+        print_session_inventory(&state_root, &inventory.sessions, &inventory.warnings);
+    }
+    Ok(0)
+}
+
+fn command_gc(args: &GcArgs) -> CliResult<i32> {
+    let state_root = workspace::state_root()?;
+    let store = GlobalSessionStore::new(&state_root);
+    let inventory = store.list()?;
+    if !inventory.warnings.is_empty() {
+        return Err(CliError::new(
+            "STATE_CORRUPTED",
+            format!(
+                "cannot safely garbage-collect sessions: {}",
+                inventory.warnings.join("; ")
+            ),
+        )
+        .hint("inspect the state root with `cowbox sessions` and repair unreadable pointers")
+        .exit(1));
+    }
+
+    let age = if args.all {
+        None
+    } else {
+        Some(parse_gc_age(args.older_than.as_deref().unwrap_or("7d"))?)
+    };
+    let cutoff_ms = age.map(|age| {
+        workspace::now_ms().saturating_sub(i64::try_from(age.as_millis()).unwrap_or(i64::MAX))
+    });
+    let mut candidates = Vec::new();
+    let mut skipped_active = 0usize;
+    let mut skipped_invalid = 0usize;
+    let mut skipped_recent = 0usize;
+    let mut skipped_recovery = 0usize;
+    let backend = backend();
+    for session in inventory.sessions {
+        if !session.valid {
+            skipped_invalid += 1;
+            continue;
+        }
+        if session.active || session.status == "active" {
+            skipped_active += 1;
+            continue;
+        }
+        if let (Some(cutoff), Some(updated)) = (cutoff_ms, session.updated_at_unix_ms) {
+            if updated > cutoff {
+                skipped_recent += 1;
+                continue;
+            }
+        }
+        let Some(workspace) = session.workspace.as_ref() else {
+            skipped_invalid += 1;
+            continue;
+        };
+        let layout = SessionLayout::new(&session.session_id, workspace, &state_root);
+        if backend.inspect_recovery(&layout)?.is_some() {
+            skipped_recovery += 1;
+            continue;
+        }
+        candidates.push(session);
+    }
+    let plan = GcPlan {
+        age,
+        candidate_bytes: candidates.iter().map(|session| session.disk_bytes).sum(),
+        candidates,
+        skipped_active,
+        skipped_invalid,
+        skipped_recent,
+        skipped_recovery,
+    };
+
+    if plan.candidates.is_empty() {
+        return finish_gc(args, &state_root, &plan, &[], 0, false);
+    }
+
+    if args.json {
+        if !args.dry_run && !args.yes {
+            eprintln!(
+                "About to remove {} finalized session(s), freeing {}.",
+                plan.candidates.len(),
+                render::format_bytes(plan.candidate_bytes)
+            );
+        }
+    } else {
+        print_gc_candidates(&plan.candidates, plan.candidate_bytes);
+    }
+
+    if args.dry_run {
+        return finish_gc(args, &state_root, &plan, &[], 0, false);
+    }
+
+    if !args.yes {
+        if !std::io::stdin().is_terminal() {
+            return Err(CliError::new(
+                "CONFIRMATION_REQUIRED",
+                "gc requires --yes when stdin is not a terminal",
+            )
+            .hint("review with `cowbox gc --dry-run --json`, then rerun with --yes")
+            .exit(2));
+        }
+        if !confirm_gc(plan.candidates.len(), plan.candidate_bytes)? {
+            return finish_gc(args, &state_root, &plan, &[], 0, true);
+        }
+    }
+
+    let mut removed = Vec::new();
+    let mut freed_bytes = 0u64;
+    for session in &plan.candidates {
+        let workspace = session.workspace.as_ref().ok_or_else(|| {
+            CliError::new(
+                "STATE_CORRUPTED",
+                format!("session {} has no workspace path", session.session_id),
+            )
+        })?;
+        let layout = SessionLayout::new(&session.session_id, workspace, &state_root);
+        if let Err(error) = backend.destroy_session(&layout) {
+            let error: CliError = error.into();
+            return Err(CliError::new(
+                error.code,
+                format!(
+                    "failed to remove session {}: {}; {} session(s) were removed before the failure",
+                    session.session_id,
+                    error.message,
+                    removed.len()
+                ),
+            )
+            .hint(error.hint.unwrap_or_else(|| {
+                "inspect the state root permissions before retrying".to_string()
+            }))
+            .exit(error.exit_code));
+        }
+        removed.push(session.session_id.clone());
+        freed_bytes += session.disk_bytes;
+    }
+
+    finish_gc(args, &state_root, &plan, &removed, freed_bytes, false)
+}
+
+fn parse_gc_age(value: &str) -> CliResult<Duration> {
+    humantime::parse_duration(value).map_err(|error| {
+        CliError::new(
+            "CONFIG_ERROR",
+            format!("invalid --older-than value {value:?}: {error}"),
+        )
+        .exit(2)
+    })
+}
+
+fn confirm_gc(count: usize, bytes: u64) -> CliResult<bool> {
+    eprintln!(
+        "Remove {count} finalized session(s) and free {}?",
+        render::format_bytes(bytes)
+    );
+    eprint!("This deletes sandbox state only, not workspace files. [y/N] ");
+    std::io::Write::flush(&mut std::io::stderr())?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
+}
+
+fn print_session_inventory(
+    state_root: &std::path::Path,
+    sessions: &[GlobalSession],
+    warnings: &[String],
+) {
+    println!("State root: {}", state_root.display());
+    for warning in warnings {
+        eprintln!("warning: {warning}");
+    }
+    if sessions.is_empty() {
+        println!("no sessions");
+        return;
+    }
+    println!(
+        "{:<12} {:<10} {:<6} {:>5} {:>10}  {:<19}  WORKSPACE",
+        "ID", "STATUS", "ACTIVE", "STEPS", "SIZE", "UPDATED"
+    );
+    let mut total_bytes = 0u64;
+    for session in sessions {
+        total_bytes += session.disk_bytes;
+        println!(
+            "{:<12} {:<10} {:<6} {:>5} {:>10}  {:<19}  {}",
+            session.session_id,
+            session.status,
+            if session.active { "yes" } else { "-" },
+            session.steps,
+            render::format_bytes(session.disk_bytes),
+            session
+                .updated_at_unix_ms
+                .map(workspace::format_timestamp)
+                .unwrap_or_else(|| "-".to_string()),
+            session
+                .workspace
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
+        if let Some(error) = &session.error {
+            eprintln!(
+                "warning: session {} is invalid: {error}",
+                session.session_id
+            );
+        }
+    }
+    println!(
+        "total: {} session(s), {}",
+        sessions.len(),
+        render::format_bytes(total_bytes)
+    );
+}
+
+fn print_gc_candidates(candidates: &[GlobalSession], bytes: u64) {
+    println!("Finalized session(s) eligible for removal:");
+    for session in candidates {
+        println!(
+            "  {}  {:<10} {:>10}  {}",
+            session.session_id,
+            session.status,
+            render::format_bytes(session.disk_bytes),
+            session
+                .workspace
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
+    }
+    println!(
+        "{} session(s), {} reclaimable",
+        candidates.len(),
+        render::format_bytes(bytes)
+    );
+}
+
+fn finish_gc(
+    args: &GcArgs,
+    state_root: &std::path::Path,
+    plan: &GcPlan,
+    removed: &[String],
+    freed_bytes: u64,
+    cancelled: bool,
+) -> CliResult<i32> {
+    if args.json {
+        json::print(&json::ok(
+            "gc",
+            None,
+            json!({
+                "state_root": state_root,
+                "older_than_seconds": plan.age.map(|age| age.as_secs()),
+                "dry_run": args.dry_run,
+                "cancelled": cancelled,
+                "candidates": &plan.candidates,
+                "candidate_bytes": plan.candidate_bytes,
+                "removed": removed,
+                "freed_bytes": freed_bytes,
+                "skipped_active": plan.skipped_active,
+                "skipped_invalid": plan.skipped_invalid,
+                "skipped_recent": plan.skipped_recent,
+                "skipped_recovery": plan.skipped_recovery,
+            }),
+        ))?;
+    } else if cancelled {
+        println!("gc cancelled; nothing removed");
+    } else if args.dry_run {
+        println!(
+            "dry-run: would remove {} session(s) and free {}",
+            plan.candidates.len(),
+            render::format_bytes(plan.candidate_bytes)
+        );
+    } else if plan.candidates.is_empty() {
+        println!("nothing to clean");
+    } else {
+        println!(
+            "removed {} session(s), freed {}",
+            removed.len(),
+            render::format_bytes(freed_bytes)
+        );
+    }
+    if !args.json
+        && (plan.skipped_active
+            + plan.skipped_invalid
+            + plan.skipped_recent
+            + plan.skipped_recovery
+            > 0)
+    {
+        println!(
+            "skipped: {} active, {} recent, {} invalid, {} with interrupted commits",
+            plan.skipped_active, plan.skipped_recent, plan.skipped_invalid, plan.skipped_recovery
+        );
+    }
+    Ok(0)
+}
+
+struct GcPlan {
+    candidates: Vec<GlobalSession>,
+    candidate_bytes: u64,
+    age: Option<Duration>,
+    skipped_active: usize,
+    skipped_invalid: usize,
+    skipped_recent: usize,
+    skipped_recovery: usize,
 }
 
 fn command_stats(args: &StatsArgs) -> CliResult<i32> {
@@ -787,10 +1470,12 @@ fn load_or_create(
         } else {
             ctx.store.write_active(&record)?;
         }
+        ensure_no_pending_commit(ctx, &record)?;
         return Ok((record, false));
     }
 
     if let Some(record) = ctx.store.load_active()? {
+        ensure_no_pending_commit(ctx, &record)?;
         return Ok((record, false));
     }
 

@@ -31,10 +31,16 @@ pub enum CliCommand {
     Undo(UndoArgs),
     /// Apply the net changes to the host workspace.
     Commit(CommitArgs),
+    /// Run a self-contained copy-on-write demo without touching the current project.
+    Demo(DemoArgs),
     /// Discard the active session.
     Discard(DiscardArgs),
     /// Check kernel and sandbox capabilities.
     Doctor(DoctorArgs),
+    /// List sessions across all workspaces.
+    Sessions(SessionsArgs),
+    /// Remove finalized session state directories.
+    Gc(GcArgs),
     /// Show session telemetry.
     Stats(StatsArgs),
     /// Install the Windows launcher and the WSL engine (Windows only).
@@ -133,10 +139,29 @@ pub struct CommitArgs {
     pub dry_run: bool,
     #[arg(long)]
     pub force: bool,
+    #[arg(
+        long,
+        help = "Recover the latest interrupted commit from its journal",
+        conflicts_with_all = ["step", "dry_run", "force", "include_excluded"]
+    )]
+    pub recover: bool,
+    #[arg(
+        long,
+        help = "Skip the interactive prompt; use only after explicit human approval"
+    )]
+    pub yes: bool,
     #[arg(long = "include-excluded")]
     pub include_excluded: bool,
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DemoArgs {
+    #[arg(long)]
+    pub json: bool,
+    #[arg(long, help = "Keep the fixture and isolated state for inspection")]
+    pub keep: bool,
 }
 
 #[derive(Debug, Args)]
@@ -155,6 +180,34 @@ pub struct DoctorArgs {
     pub json: bool,
     #[arg(long = "trace-chrome")]
     pub trace_chrome: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct SessionsArgs {
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GcArgs {
+    #[arg(
+        long = "older-than",
+        conflicts_with = "all",
+        help = "Only remove finalized sessions older than this duration"
+    )]
+    pub older_than: Option<String>,
+    #[arg(
+        long,
+        conflicts_with = "older_than",
+        help = "Remove every finalized session regardless of age"
+    )]
+    pub all: bool,
+    #[arg(long = "dry-run", help = "Show candidates without removing anything")]
+    pub dry_run: bool,
+    #[arg(long, help = "Confirm removal without an interactive prompt")]
+    pub yes: bool,
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -242,8 +295,11 @@ impl CliCommand {
             CliCommand::Rollback(_) => "rollback",
             CliCommand::Undo(_) => "undo",
             CliCommand::Commit(_) => "commit",
+            CliCommand::Demo(_) => "demo",
             CliCommand::Discard(_) => "discard",
             CliCommand::Doctor(_) => "doctor",
+            CliCommand::Sessions(_) => "sessions",
+            CliCommand::Gc(_) => "gc",
             CliCommand::Stats(_) => "stats",
             CliCommand::Setup(_) => "setup",
             CliCommand::InstallSkill(_) => "install-skill",
@@ -265,8 +321,11 @@ impl CliCommand {
             CliCommand::Rollback(args) => args.json,
             CliCommand::Undo(args) => args.json,
             CliCommand::Commit(args) => args.json,
+            CliCommand::Demo(args) => args.json,
             CliCommand::Discard(args) => args.json,
             CliCommand::Doctor(args) => args.json,
+            CliCommand::Sessions(args) => args.json,
+            CliCommand::Gc(args) => args.json,
             CliCommand::Stats(args) => args.json,
             CliCommand::Setup(args) => args.json,
             CliCommand::InstallSkill(args) => args.json,

@@ -264,7 +264,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cowbox-cli"
-version = "0.2.0-m1"
+version = "0.3.0-m1"
 dependencies = [
  "assert_cmd",
  "chrono",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "cowbox-core"
-version = "0.2.0-m1"
+version = "0.3.0-m1"
 dependencies = [
  "chrono",
  "cowbox-dag",
@@ -311,7 +311,7 @@ dependencies = [
 
 [[package]]
 name = "cowbox-dag"
-version = "0.2.0-m1"
+version = "0.3.0-m1"
 dependencies = [
  "serde",
  "serde_json",

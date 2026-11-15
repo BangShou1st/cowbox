@@ -43,6 +43,9 @@ fn install_skill_uses_cowbox_subdirectory_and_list_shows_all_harnesses() {
     assert!(skill.join("references/windows.md").is_file());
     assert!(skill.join(".cowbox-source").is_file());
     assert!(home.path().join(".codex/skills/cowbox/SKILL.md").is_file());
+    let skill_text = fs::read_to_string(skill.join("SKILL.md")).expect("skill text");
+    assert!(!skill_text.contains("untrusted scripts"));
+    assert!(skill_text.contains("does not isolate the network"));
 
     let list = json_output(cowbox(&home, &project).args(["install-skill", "--list", "--json"]));
     let harnesses = list["data"]["harnesses"].as_array().expect("harness list");
@@ -65,6 +68,9 @@ fn install_rules_is_idempotent_and_removable() {
     assert!(cursor.is_file());
     let text = fs::read_to_string(&agents).expect("agents rules");
     assert_eq!(text.matches("<!-- cowbox:begin -->").count(), 1);
+    assert!(text.contains("cowbox commit --yes"));
+    assert!(!text.contains("untrusted script"));
+    assert!(text.contains("does not isolate the network"));
 
     let second = json_output(cowbox(&home, &project).args(["install-rules", "--json"]));
     assert!(
@@ -97,6 +103,13 @@ fn policy_defaults_to_ask_and_project_can_override() {
     let value = json_output(cowbox(&home, &project).args(["policy", "--json"]));
     assert_eq!(value["data"]["mode"].as_str(), Some("ask"));
     assert_eq!(value["data"]["source"].as_str(), Some("global"));
+    assert!(
+        !value["data"]["triggers"]
+            .as_array()
+            .expect("triggers")
+            .iter()
+            .any(|trigger| trigger == "untrusted_script")
+    );
 
     fs::write(
         project.path().join(".cowbox.toml"),
@@ -118,6 +131,11 @@ fn init_agent_writes_config_and_rules() {
     assert!(project.path().join("AGENTS.md").is_file());
     assert!(project.path().join("CLAUDE.md").is_file());
     assert!(project.path().join(".cursor/rules/cowbox.mdc").is_file());
+    let config = fs::read_to_string(project.path().join(".cowbox.toml")).expect("config");
+    assert!(!config.contains("untrusted_script"));
+    assert!(config.contains(
+        "triggers = [\"destructive_shell\", \"database_migration\", \"dependency_upgrade\", \"multi_file_refactor\"]"
+    ));
 }
 
 #[test]

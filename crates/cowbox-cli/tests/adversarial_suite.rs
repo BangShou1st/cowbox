@@ -3,8 +3,10 @@ use rusqlite::Connection;
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
+use std::process::Output;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
@@ -148,6 +150,13 @@ fn sqlite_integrity(path: &Path) -> String {
         .expect("integrity_check")
 }
 
+fn sqlite_user_count(path: &Path) -> i64 {
+    let connection = Connection::open(path).expect("open sqlite");
+    connection
+        .query_row("select count(*) from users", [], |row| row.get(0))
+        .expect("count users")
+}
+
 fn populate_large_workspace(root: &Path, files: usize) {
     let src = root.join("src");
     fs::create_dir_all(&src).expect("src");
@@ -183,6 +192,81 @@ fn process_cmdline_contains(needle: &str) -> bool {
         }
     }
     false
+}
+
+fn crash_cowbox(env: &TestEnv, args: &[&str], point: &str) -> Output {
+    let mut command = env.cowbox();
+    command
+        .args(args)
+        .env("COWBOX_TEST_CRASH", point)
+        .output()
+        .expect("run cowbox with crash injection")
+}
+
+fn assert_sigkill(output: &Output) {
+    assert_eq!(
+        output.status.signal(),
+        Some(9),
+        "process was not killed at the requested commit point: status={:?} stdout={} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn assert_abort(output: &Output) {
+    assert_eq!(
+        output.status.signal(),
+        Some(6),
+        "process was not aborted at the requested commit point: status={:?} stdout={} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn session_dir(env: &TestEnv, session_id: &str) -> PathBuf {
+    env.state.path().join("sessions").join(session_id)
+}
+
+fn only_commit_journal(env: &TestEnv, session_id: &str) -> PathBuf {
+    let root = session_dir(env, session_id).join("commit");
+    let journals = fs::read_dir(&root)
+        .expect("commit journal root")
+        .map(|entry| entry.expect("journal entry").path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    assert_eq!(journals.len(), 1, "expected one journal: {journals:?}");
+    journals.into_iter().next().expect("journal")
+}
+
+fn journal_phase(journal: &Path) -> String {
+    let meta: Value =
+        serde_json::from_slice(&fs::read(journal.join("meta.json")).expect("journal meta"))
+            .expect("journal meta json");
+    meta["phase"].as_str().expect("journal phase").to_string()
+}
+
+fn active_pointers(env: &TestEnv) -> Vec<PathBuf> {
+    let root = env.state.path().join("workspaces");
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .map(|entry| entry.expect("workspace entry").path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .collect()
+}
+
+fn session_status(env: &TestEnv, session_id: &str) -> String {
+    let value: Value = serde_json::from_slice(
+        &fs::read(session_dir(env, session_id).join("session.json")).expect("session record"),
+    )
+    .expect("session json");
+    value["status"]
+        .as_str()
+        .expect("session status")
+        .to_string()
 }
 
 #[test]
@@ -341,7 +425,7 @@ fn commit_applies_all_change_kinds_and_closes_the_session() {
     assert_eq!(code, 0, "run failed: {run}");
     assert_ok(&run, "run");
 
-    let (code, commit) = env.json(&["commit", "--json"]);
+    let (code, commit) = env.json(&["commit", "--yes", "--json"]);
     assert_eq!(code, 0, "commit failed: {commit}");
     assert_ok(&commit, "commit");
     assert_eq!(commit["data"]["committed"].as_bool(), Some(true));
@@ -384,6 +468,528 @@ fn commit_applies_all_change_kinds_and_closes_the_session() {
 }
 
 #[test]
+fn commit_requires_explicit_approval_without_tty() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    fs::write(env.workspace.path().join("file.txt"), "base\n").expect("file");
+    env.init();
+    let (code, run) = run_script(&env, "printf sandbox > file.txt");
+    assert_eq!(code, 0, "run failed: {run}");
+    assert_ok(&run, "run");
+
+    let (code, blocked) = env.json(&["commit", "--json"]);
+    assert_eq!(code, 2, "commit unexpectedly succeeded: {blocked}");
+    assert_eq!(blocked["ok"].as_bool(), Some(false));
+    assert_eq!(
+        blocked["error"]["code"].as_str(),
+        Some("CONFIRMATION_REQUIRED")
+    );
+    assert_eq!(
+        fs::read_to_string(env.workspace.path().join("file.txt")).expect("host file"),
+        "base\n"
+    );
+
+    let (code, log) = env.json(&["log", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(log["data"]["dag"]["head_step"].as_u64(), Some(1));
+
+    let (code, preview) = env.json(&["commit", "--dry-run", "--json"]);
+    assert_eq!(code, 0, "dry-run failed: {preview}");
+    assert_eq!(preview["data"]["committed"].as_bool(), Some(false));
+    assert_eq!(preview["data"]["dry_run"].as_bool(), Some(true));
+
+    let (code, committed) = env.json(&["commit", "--yes", "--json"]);
+    assert_eq!(code, 0, "approved commit failed: {committed}");
+    assert_eq!(committed["data"]["committed"].as_bool(), Some(true));
+    assert_eq!(
+        fs::read_to_string(env.workspace.path().join("file.txt")).expect("host file"),
+        "sandbox"
+    );
+}
+
+#[test]
+fn sessions_and_gc_preserve_active_and_recent_state() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    fs::write(env.workspace.path().join("file.txt"), "base\n").expect("file");
+    env.init();
+    let (code, run) = run_script(&env, "printf sandbox > file.txt");
+    assert_eq!(code, 0, "run failed: {run}");
+    assert_ok(&run, "run");
+    let session_id = run["session"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+    let session_dir = env.state.path().join("sessions").join(&session_id);
+    assert!(session_dir.is_dir());
+
+    let (code, sessions) = env.json(&["sessions", "--json"]);
+    assert_eq!(code, 0, "sessions failed: {sessions}");
+    assert_ok(&sessions, "sessions");
+    let active = sessions["data"]["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .find(|session| session["session_id"].as_str() == Some(session_id.as_str()))
+        .expect("active session listed");
+    assert_eq!(active["status"].as_str(), Some("active"));
+    assert_eq!(active["active"].as_bool(), Some(true));
+
+    let (code, gc_active) = env.json(&["gc", "--all", "--yes", "--json"]);
+    assert_eq!(code, 0, "active gc failed: {gc_active}");
+    assert_eq!(
+        gc_active["data"]["removed"].as_array().map(Vec::len),
+        Some(0)
+    );
+    assert_eq!(gc_active["data"]["skipped_active"].as_u64(), Some(1));
+    assert!(session_dir.is_dir());
+
+    let (code, commit) = env.json(&["commit", "--yes", "--json"]);
+    assert_eq!(code, 0, "commit failed: {commit}");
+    assert_ok(&commit, "commit");
+
+    let (code, recent) = env.json(&["gc", "--yes", "--json"]);
+    assert_eq!(code, 0, "recent gc failed: {recent}");
+    assert_eq!(recent["data"]["removed"].as_array().map(Vec::len), Some(0));
+    assert_eq!(recent["data"]["skipped_recent"].as_u64(), Some(1));
+    assert!(session_dir.is_dir());
+
+    let (code, blocked) = env.json(&["gc", "--all", "--json"]);
+    assert_eq!(
+        code, 2,
+        "gc unexpectedly ran without confirmation: {blocked}"
+    );
+    assert_eq!(
+        blocked["error"]["code"].as_str(),
+        Some("CONFIRMATION_REQUIRED")
+    );
+    assert!(session_dir.is_dir());
+
+    let (code, dry_run) = env.json(&["gc", "--all", "--dry-run", "--json"]);
+    assert_eq!(code, 0, "gc dry-run failed: {dry_run}");
+    assert_eq!(
+        dry_run["data"]["candidates"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(dry_run["data"]["removed"].as_array().map(Vec::len), Some(0));
+    assert!(session_dir.is_dir());
+
+    let (code, removed) = env.json(&["gc", "--all", "--yes", "--json"]);
+    assert_eq!(code, 0, "gc failed: {removed}");
+    assert_ok(&removed, "gc");
+    assert_eq!(removed["data"]["removed"].as_array().map(Vec::len), Some(1));
+    assert!(removed["data"]["freed_bytes"].as_u64().unwrap_or_default() > 0);
+    assert!(!session_dir.exists());
+
+    let (code, empty) = env.json(&["sessions", "--json"]);
+    assert_eq!(code, 0);
+    assert!(
+        empty["data"]["sessions"]
+            .as_array()
+            .expect("sessions")
+            .is_empty()
+    );
+}
+
+#[test]
+fn commit_interruption_before_commit_point_restores_host_and_preserves_backup() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    let names = ["a.txt", "b.txt", "c.txt"];
+    for name in names {
+        fs::write(env.workspace.path().join(name), "before\n").expect("fixture file");
+    }
+    env.init();
+    let (code, run) = run_script(
+        &env,
+        "printf after > a.txt; printf after > b.txt; printf after > c.txt",
+    );
+    assert_eq!(code, 0, "run failed: {run}");
+    let session_id = run["session"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+
+    let crashed = crash_cowbox(
+        &env,
+        &["commit", "--yes", "--json"],
+        "commit-after-first-write",
+    );
+    assert_sigkill(&crashed);
+    let journal = only_commit_journal(&env, &session_id);
+    assert_eq!(journal_phase(&journal), "applying");
+    for name in names {
+        assert_eq!(
+            fs::read_to_string(journal.join("backup").join(name)).expect("backup"),
+            "before\n",
+            "backup for {name} was removed or rewritten"
+        );
+    }
+    let contents = names
+        .iter()
+        .map(|name| fs::read_to_string(env.workspace.path().join(name)).expect("host"))
+        .collect::<Vec<_>>();
+    assert!(
+        contents.iter().any(|value| value == "after"),
+        "the interrupted commit wrote no host file: {contents:?}"
+    );
+    assert!(
+        contents.iter().any(|value| value == "before\n"),
+        "the interrupted commit unexpectedly wrote every host file: {contents:?}"
+    );
+    assert_eq!(active_pointers(&env).len(), 1);
+
+    let (code, blocked) = env.json(&["run", "--json", "--", "true"]);
+    assert_eq!(code, 2, "run should require recovery: {blocked}");
+    assert_eq!(
+        blocked["error"]["code"].as_str(),
+        Some("COMMIT_RECOVERY_REQUIRED")
+    );
+
+    let (code, recovered) = env.json(&["commit", "--recover", "--yes", "--json"]);
+    assert_eq!(code, 0, "recovery failed: {recovered}");
+    assert_eq!(recovered["data"]["recovered"].as_bool(), Some(true));
+    assert_eq!(recovered["data"]["action"].as_str(), Some("restore_host"));
+    assert_eq!(recovered["data"]["restored"].as_u64(), Some(3));
+    for name in names {
+        assert_eq!(
+            fs::read_to_string(env.workspace.path().join(name)).expect("restored host"),
+            "before\n"
+        );
+    }
+    assert_eq!(journal_phase(&journal), "rolled_back");
+    assert!(!journal.join("backup").exists());
+    assert_eq!(active_pointers(&env).len(), 1);
+    let (code, log) = env.json(&["log", "--json"]);
+    assert_eq!(code, 0, "session did not remain usable: {log}");
+
+    let (code, repeated) = env.json(&["commit", "--recover", "--yes", "--json"]);
+    assert_eq!(code, 0, "repeated recovery failed: {repeated}");
+    assert_eq!(repeated["data"]["recovered"].as_bool(), Some(false));
+    assert_eq!(repeated["data"]["already_complete"].as_bool(), Some(true));
+
+    let (code, committed) = env.json(&["commit", "--yes", "--json"]);
+    assert_eq!(code, 0, "retry after recovery failed: {committed}");
+    assert_eq!(committed["data"]["committed"].as_bool(), Some(true));
+    for name in names {
+        assert_eq!(
+            fs::read_to_string(env.workspace.path().join(name)).expect("committed host"),
+            "after"
+        );
+    }
+    assert!(active_pointers(&env).is_empty());
+    assert_eq!(session_status(&env, &session_id), "committed");
+}
+
+#[test]
+fn interrupted_recovery_is_idempotent_and_can_resume() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    let names = ["a.txt", "b.txt"];
+    for name in names {
+        fs::write(env.workspace.path().join(name), "before\n").expect("fixture file");
+    }
+    env.init();
+    let (code, run) = run_script(&env, "printf after > a.txt; printf after > b.txt");
+    assert_eq!(code, 0, "run failed: {run}");
+    let session_id = run["session"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+
+    let crashed = crash_cowbox(
+        &env,
+        &["commit", "--yes", "--json"],
+        "commit-after-first-write",
+    );
+    assert_sigkill(&crashed);
+    let journal = only_commit_journal(&env, &session_id);
+
+    let interrupted = crash_cowbox(
+        &env,
+        &["commit", "--recover", "--yes", "--json"],
+        "recover-after-first-restore",
+    );
+    assert_sigkill(&interrupted);
+    assert_eq!(journal_phase(&journal), "restoring");
+    for name in names {
+        assert_eq!(
+            fs::read_to_string(journal.join("backup").join(name)).expect("backup"),
+            "before\n"
+        );
+    }
+    let partial = names
+        .iter()
+        .map(|name| fs::read_to_string(env.workspace.path().join(name)).expect("host"))
+        .collect::<Vec<_>>();
+    assert!(
+        partial.iter().any(|value| value == "before\n")
+            && partial.iter().any(|value| value == "after"),
+        "recovery interrupt did not leave a partial restore: {partial:?}"
+    );
+    assert_eq!(active_pointers(&env).len(), 1);
+
+    let (code, recovered) = env.json(&["commit", "--recover", "--yes", "--json"]);
+    assert_eq!(code, 0, "resumed recovery failed: {recovered}");
+    assert_eq!(recovered["data"]["action"].as_str(), Some("restore_host"));
+    assert_eq!(recovered["data"]["restored"].as_u64(), Some(2));
+    for name in names {
+        assert_eq!(
+            fs::read_to_string(env.workspace.path().join(name)).expect("restored host"),
+            "before\n"
+        );
+    }
+    assert_eq!(journal_phase(&journal), "rolled_back");
+    assert!(!journal.join("backup").exists());
+    let (code, log) = env.json(&["log", "--json"]);
+    assert_eq!(code, 0, "session is not active after recovery: {log}");
+}
+
+#[test]
+fn applied_commit_without_session_finalization_is_completed_on_restart() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    let names = ["a.txt", "b.txt"];
+    for name in names {
+        fs::write(env.workspace.path().join(name), "before\n").expect("fixture file");
+    }
+    env.init();
+    let (code, run) = run_script(&env, "printf after > a.txt; printf after > b.txt");
+    assert_eq!(code, 0, "run failed: {run}");
+    let session_id = run["session"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+
+    let crashed = crash_cowbox(&env, &["commit", "--yes", "--json"], "commit-after-applied");
+    assert_sigkill(&crashed);
+    let journal = only_commit_journal(&env, &session_id);
+    assert_eq!(journal_phase(&journal), "applied");
+    for name in names {
+        assert_eq!(
+            fs::read_to_string(env.workspace.path().join(name)).expect("committed host"),
+            "after"
+        );
+        assert_eq!(
+            fs::read_to_string(journal.join("backup").join(name)).expect("backup"),
+            "before\n"
+        );
+    }
+    assert_eq!(session_status(&env, &session_id), "active");
+    assert_eq!(active_pointers(&env).len(), 1);
+
+    let (code, blocked) = env.json(&["commit", "--yes", "--json"]);
+    assert_eq!(code, 2, "commit should require recovery: {blocked}");
+    assert_eq!(
+        blocked["error"]["code"].as_str(),
+        Some("COMMIT_RECOVERY_REQUIRED")
+    );
+
+    let (code, recovered) = env.json(&["commit", "--recover", "--yes", "--json"]);
+    assert_eq!(code, 0, "finalizing recovery failed: {recovered}");
+    assert_eq!(recovered["data"]["recovered"].as_bool(), Some(true));
+    assert_eq!(
+        recovered["data"]["action"].as_str(),
+        Some("finalize_commit")
+    );
+    assert_eq!(recovered["data"]["restored"].as_u64(), Some(0));
+    for name in names {
+        assert_eq!(
+            fs::read_to_string(env.workspace.path().join(name)).expect("committed host"),
+            "after"
+        );
+    }
+    assert_eq!(session_status(&env, &session_id), "committed");
+    assert_eq!(journal_phase(&journal), "complete");
+    assert!(!journal.join("backup").exists());
+    assert!(active_pointers(&env).is_empty());
+
+    let (code, repeated) = env.json(&["commit", "--recover", "--yes", "--json"]);
+    assert_eq!(code, 0, "repeated finalization failed: {repeated}");
+    assert_eq!(repeated["data"]["recovered"].as_bool(), Some(false));
+    assert_eq!(repeated["data"]["already_complete"].as_bool(), Some(true));
+
+    let (code, sessions) = env.json(&["sessions", "--json"]);
+    assert_eq!(code, 0);
+    let session = sessions["data"]["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .find(|session| session["session_id"].as_str() == Some(session_id.as_str()))
+        .expect("session listed");
+    assert_eq!(session["status"].as_str(), Some("committed"));
+    assert_eq!(session["active"].as_bool(), Some(false));
+
+    let (code, discarded) = env.json(&["discard", "--yes", "--json"]);
+    assert_eq!(code, 0, "discard after recovery failed: {discarded}");
+    assert_eq!(discarded["data"]["discarded"].as_bool(), Some(false));
+}
+
+#[test]
+fn stale_active_pointer_after_session_save_is_finalized_idempotently() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    fs::write(env.workspace.path().join("file.txt"), "before\n").expect("fixture file");
+    env.init();
+    let (code, run) = run_script(&env, "printf after > file.txt");
+    assert_eq!(code, 0, "run failed: {run}");
+    let session_id = run["session"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+
+    let crashed = crash_cowbox(
+        &env,
+        &["commit", "--yes", "--json"],
+        "commit-after-session-save",
+    );
+    assert_abort(&crashed);
+    let journal = only_commit_journal(&env, &session_id);
+    assert_eq!(
+        fs::read_to_string(env.workspace.path().join("file.txt")).expect("committed host"),
+        "after"
+    );
+    assert_eq!(session_status(&env, &session_id), "committed");
+    assert_eq!(active_pointers(&env).len(), 1);
+    assert_eq!(journal_phase(&journal), "applied");
+    assert!(journal.join("backup/file.txt").exists());
+
+    let (code, recovered) = env.json(&["commit", "--recover", "--yes", "--json"]);
+    assert_eq!(code, 0, "stale-pointer recovery failed: {recovered}");
+    assert_eq!(
+        recovered["data"]["action"].as_str(),
+        Some("finalize_commit")
+    );
+    assert_eq!(
+        fs::read_to_string(env.workspace.path().join("file.txt")).expect("committed host"),
+        "after"
+    );
+    assert_eq!(session_status(&env, &session_id), "committed");
+    assert_eq!(journal_phase(&journal), "complete");
+    assert!(!journal.join("backup").exists());
+    assert!(active_pointers(&env).is_empty());
+
+    let (code, repeated) = env.json(&["commit", "--recover", "--yes", "--json"]);
+    assert_eq!(code, 0, "repeated recovery failed: {repeated}");
+    assert_eq!(repeated["data"]["recovered"].as_bool(), Some(false));
+    assert_eq!(repeated["data"]["already_complete"].as_bool(), Some(true));
+}
+
+#[test]
+fn gc_skips_a_committed_session_until_its_journal_is_finalized() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    fs::write(env.workspace.path().join("file.txt"), "before\n").expect("fixture file");
+    env.init();
+    let (code, run) = run_script(&env, "printf after > file.txt");
+    assert_eq!(code, 0, "run failed: {run}");
+    let session_id = run["session"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+
+    let crashed = crash_cowbox(
+        &env,
+        &["commit", "--yes", "--json"],
+        "commit-after-active-clear",
+    );
+    assert_abort(&crashed);
+    let journal = only_commit_journal(&env, &session_id);
+    assert_eq!(journal_phase(&journal), "applied");
+    assert!(journal.join("backup/file.txt").exists());
+    assert_eq!(session_status(&env, &session_id), "committed");
+    assert!(active_pointers(&env).is_empty());
+
+    let (code, gc) = env.json(&["gc", "--all", "--yes", "--json"]);
+    assert_eq!(code, 0, "gc failed: {gc}");
+    assert_eq!(gc["data"]["removed"].as_array().map(Vec::len), Some(0));
+    assert_eq!(gc["data"]["skipped_recovery"].as_u64(), Some(1));
+    assert!(session_dir(&env, &session_id).is_dir());
+    assert!(journal.join("backup/file.txt").exists());
+
+    let (code, recovered) = env.json(&["commit", "--recover", "--yes", "--json"]);
+    assert_eq!(code, 0, "finalization failed: {recovered}");
+    assert_eq!(journal_phase(&journal), "complete");
+    assert!(!journal.join("backup").exists());
+
+    let (code, gc) = env.json(&["gc", "--all", "--yes", "--json"]);
+    assert_eq!(code, 0, "gc after finalization failed: {gc}");
+    assert_eq!(gc["data"]["removed"].as_array().map(Vec::len), Some(1));
+    assert!(!session_dir(&env, &session_id).exists());
+}
+
+#[test]
+fn recovery_refuses_external_edits_and_keeps_the_backup() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    let names = ["a.txt", "b.txt"];
+    for name in names {
+        fs::write(env.workspace.path().join(name), "before\n").expect("fixture file");
+    }
+    env.init();
+    let (code, run) = run_script(&env, "printf after > a.txt; printf after > b.txt");
+    assert_eq!(code, 0, "run failed: {run}");
+    let session_id = run["session"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+
+    let crashed = crash_cowbox(
+        &env,
+        &["commit", "--yes", "--json"],
+        "commit-after-first-write",
+    );
+    assert_sigkill(&crashed);
+    let journal = only_commit_journal(&env, &session_id);
+    let drifted = names
+        .iter()
+        .find(|name| {
+            fs::read_to_string(env.workspace.path().join(name))
+                .map(|value| value == "before\n")
+                .unwrap_or(false)
+        })
+        .expect("one host file should remain at its pre-state");
+    fs::write(env.workspace.path().join(drifted), "external\n").expect("external edit");
+
+    let (code, refused) = env.json(&["commit", "--recover", "--yes", "--json"]);
+    assert_eq!(code, 1, "drift recovery unexpectedly succeeded: {refused}");
+    assert_eq!(refused["error"]["code"].as_str(), Some("COMMIT_FAILED"));
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("changed after the recorded pre/post state"),
+        "error did not identify external drift: {refused}"
+    );
+    assert_eq!(
+        fs::read_to_string(env.workspace.path().join(drifted)).expect("external host file"),
+        "external\n"
+    );
+    assert_eq!(
+        fs::read_to_string(journal.join("backup").join(drifted)).expect("backup"),
+        "before\n"
+    );
+    assert_eq!(journal_phase(&journal), "applying");
+    assert_eq!(active_pointers(&env).len(), 1);
+}
+
+#[test]
 fn commit_refuses_fifo_entries() {
     let env = TestEnv::new();
     if !require_sandbox(&env) {
@@ -392,7 +998,7 @@ fn commit_refuses_fifo_entries() {
     env.init();
     let (code, run) = run_script(&env, "mkfifo fifo");
     assert_eq!(code, 0, "mkfifo failed: {run}");
-    let (code, commit) = env.json(&["commit", "--json"]);
+    let (code, commit) = env.json(&["commit", "--yes", "--json"]);
     assert_eq!(code, 1);
     assert_eq!(commit["ok"].as_bool(), Some(false));
     assert!(!env.workspace.path().join("fifo").exists());
@@ -410,7 +1016,7 @@ fn commit_refuses_host_drift_but_force_writes_with_a_journal() {
     assert_eq!(code, 0, "run failed: {run}");
     fs::write(env.workspace.path().join("file.txt"), "host-edit\n").expect("host edit");
 
-    let (code, conflict) = env.json(&["commit", "--json"]);
+    let (code, conflict) = env.json(&["commit", "--yes", "--json"]);
     assert_eq!(code, 2, "expected conflict: {conflict}");
     assert_eq!(conflict["ok"].as_bool(), Some(false));
     assert_eq!(conflict["error"]["code"].as_str(), Some("COMMIT_CONFLICT"));
@@ -419,7 +1025,7 @@ fn commit_refuses_host_drift_but_force_writes_with_a_journal() {
         "host-edit\n"
     );
 
-    let (code, forced) = env.json(&["commit", "--force", "--json"]);
+    let (code, forced) = env.json(&["commit", "--force", "--yes", "--json"]);
     assert_eq!(code, 0, "force commit failed: {forced}");
     assert_ok(&forced, "commit");
     assert_eq!(forced["data"]["committed"].as_bool(), Some(true));
@@ -429,6 +1035,126 @@ fn commit_refuses_host_drift_but_force_writes_with_a_journal() {
     );
     let journal = forced["data"]["journal"].as_str().expect("journal path");
     assert!(Path::new(journal).join("ops.json").exists());
+}
+
+#[test]
+fn commit_keeps_sqlite_wal_sidecars_consistent() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    let database = env.workspace.path().join("data/app.sqlite");
+    create_sqlite(&database);
+    env.init();
+    let (code, run) = run_script(
+        &env,
+        r#"python3 - <<'PY'
+import os
+import sqlite3
+
+conn = sqlite3.connect("data/app.sqlite")
+conn.execute("pragma journal_mode=wal")
+conn.execute("insert into users (email) values ('wal@example.com')")
+conn.commit()
+os._exit(0)
+PY"#,
+    );
+    assert_eq!(code, 0, "WAL run failed: {run}");
+
+    let (code, diff) = env.json(&["diff", "--json"]);
+    assert_eq!(code, 0, "diff failed: {diff}");
+    let paths = diff["data"]["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .filter_map(|change| change["rel_path"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        paths.contains(&"data/app.sqlite-wal"),
+        "missing WAL: {paths:?}"
+    );
+    assert!(
+        paths.contains(&"data/app.sqlite-shm"),
+        "missing SHM: {paths:?}"
+    );
+
+    let (code, commit) = env.json(&["commit", "--yes", "--json"]);
+    assert_eq!(code, 0, "commit failed: {commit}");
+    assert_ok(&commit, "commit");
+    assert!(env.workspace.path().join("data/app.sqlite-wal").exists());
+    assert!(env.workspace.path().join("data/app.sqlite-shm").exists());
+    assert_eq!(
+        sqlite_integrity(&env.workspace.path().join("data/app.sqlite")),
+        "ok"
+    );
+    assert_eq!(sqlite_user_count(&database), 2);
+}
+
+#[test]
+fn commit_removes_stale_sqlite_sidecars_not_present_in_the_sandbox() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    let database = env.workspace.path().join("data/app.sqlite");
+    create_sqlite(&database);
+    fs::write(env.workspace.path().join("data/app.sqlite-wal"), b"").expect("stale sidecar");
+    env.init();
+    let (code, run) = run_script(
+        &env,
+        r#"python3 - <<'PY'
+import sqlite3
+
+conn = sqlite3.connect("data/app.sqlite")
+conn.execute("insert into users (email) values ('stale-sidecar@example.com')")
+conn.commit()
+conn.close()
+PY"#,
+    );
+    assert_eq!(code, 0, "sqlite rewrite failed: {run}");
+
+    let (code, commit) = env.json(&["commit", "--yes", "--json"]);
+    assert_eq!(code, 0, "commit failed: {commit}");
+    assert_ok(&commit, "commit");
+    assert!(
+        !env.workspace.path().join("data/app.sqlite-wal").exists(),
+        "stale WAL sidecar survived the commit"
+    );
+    assert_eq!(sqlite_user_count(&database), 2);
+}
+
+#[test]
+fn commit_refuses_unexpected_host_sidecars_created_after_init() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    let database = env.workspace.path().join("data/app.sqlite");
+    create_sqlite(&database);
+    env.init();
+    let (code, run) = run_script(
+        &env,
+        r#"python3 - <<'PY'
+import sqlite3
+
+conn = sqlite3.connect("data/app.sqlite")
+conn.execute("insert into users (email) values ('external-sidecar@example.com')")
+conn.commit()
+conn.close()
+PY"#,
+    );
+    assert_eq!(code, 0, "sqlite rewrite failed: {run}");
+    fs::write(env.workspace.path().join("data/app.sqlite-wal"), b"").expect("external sidecar");
+
+    let (code, conflict) = env.json(&["commit", "--yes", "--json"]);
+    assert_eq!(code, 2, "unexpected sidecar was not rejected: {conflict}");
+    assert_eq!(conflict["error"]["code"].as_str(), Some("COMMIT_CONFLICT"));
+    assert!(env.workspace.path().join("data/app.sqlite-wal").exists());
+
+    let (code, forced) = env.json(&["commit", "--force", "--yes", "--json"]);
+    assert_eq!(code, 0, "forced commit failed: {forced}");
+    assert!(!env.workspace.path().join("data/app.sqlite-wal").exists());
+    assert_eq!(sqlite_user_count(&database), 2);
 }
 
 #[test]
@@ -469,6 +1195,73 @@ fn timeout_returns_124_and_leaves_no_process() {
         log["data"]["dag"]["nodes"]["1"]["timed_out"].as_bool(),
         Some(true)
     );
+}
+
+#[test]
+fn demo_runs_isolated_and_cleans_up() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    let (code, demo) = env.json(&["demo", "--json"]);
+    assert_eq!(code, 0, "demo failed: {demo}");
+    assert_ok(&demo, "demo");
+    assert_eq!(demo["data"]["host_unchanged"].as_bool(), Some(true));
+    assert_eq!(demo["data"]["kept"].as_bool(), Some(false));
+    assert_eq!(demo["data"]["steps"].as_u64(), Some(2));
+    assert!(
+        demo["data"]["summary"]["files"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0
+    );
+    let workspace = demo["data"]["workspace"]
+        .as_str()
+        .expect("demo workspace path");
+    let state_home = demo["data"]["state_home"]
+        .as_str()
+        .expect("demo state path");
+    assert!(!Path::new(workspace).exists());
+    assert!(!Path::new(state_home).exists());
+}
+
+#[test]
+fn demo_keep_preserves_the_fixture() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    let (code, demo) = env.json(&["demo", "--keep", "--json"]);
+    assert_eq!(code, 0, "demo failed: {demo}");
+    assert_eq!(demo["data"]["kept"].as_bool(), Some(true));
+    let workspace = demo["data"]["workspace"]
+        .as_str()
+        .expect("demo workspace path");
+    let state_home = demo["data"]["state_home"]
+        .as_str()
+        .expect("demo state path");
+    assert!(Path::new(workspace).join("src/main.rs").is_file());
+    assert!(Path::new(state_home).is_dir());
+    assert!(
+        fs::read_dir(Path::new(state_home).join("sessions"))
+            .expect("demo sessions")
+            .next()
+            .is_some()
+    );
+    let cleanup = Command::cargo_bin("cowbox")
+        .expect("cowbox binary")
+        .current_dir(workspace)
+        .env("COWBOX_HOME", state_home)
+        .args(["discard", "--yes", "--purge", "--json"])
+        .output()
+        .expect("discard kept demo");
+    assert!(
+        cleanup.status.success(),
+        "discard kept demo failed: {}",
+        String::from_utf8_lossy(&cleanup.stderr)
+    );
+    fs::remove_dir_all(workspace).expect("remove kept demo workspace");
+    fs::remove_dir_all(state_home).expect("remove kept demo state");
 }
 
 #[test]
@@ -534,7 +1327,7 @@ fn nine_p_smoke_is_opt_in_and_cleans_up() {
     assert!(init.status.success());
     let change = run(&["run", "--json", "--", "sh", "-c", "printf 9p > a.txt"]);
     assert_eq!(change.status.code(), Some(0));
-    let commit = run(&["commit", "--json"]);
+    let commit = run(&["commit", "--yes", "--json"]);
     assert_eq!(commit.status.code(), Some(0));
     assert_eq!(
         fs::read_to_string(workspace.path().join("a.txt")).expect("9p result"),

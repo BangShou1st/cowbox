@@ -27,13 +27,17 @@ isolation, multi-agent racing, and the eval leaderboard.
 
 ## M1.5: Windows launcher and agent packaging
 
-Status: in progress in `0.2.0-m1`.
+Status: preview released in `0.3.0-m1`.
 
 - [x] Native Windows launcher that delegates to WSL via `wsl.exe --cd`.
 - [x] `cowbox setup` CLI installer with release checksum verification.
 - [x] `install-skill` for 14 agent harnesses; manual opt-in only.
 - [x] `install-rules` and `init --agent` project policy blocks.
 - [x] `policy --json` with ask/explicit/auto modes.
+- [x] `cowbox demo` self-verification and explicit commit approval.
+- [x] Global `sessions` inventory and safe `gc` for finalized state.
+- [x] Commit hardening: SQLite sidecars, hardlinks, `user.*` xattrs, and
+  restore-or-finalize journals for process interruptions.
 - [ ] MCP server (`cowbox mcp`) for MCP-native agents.
 
 ## M2: stronger containment and scale
@@ -42,8 +46,6 @@ Status: in progress in `0.2.0-m1`.
   kernel supports it.
 - Read-only cache bind mounts for Cargo/npm/pip caches so sandboxed installs do
   not re-download gigabytes.
-- Commit hardening for SQLite sidecars, hardlinks, xattrs, and resumable
-  journals.
 - 200k-file benchmark fixtures and regression tracking.
 - Blocked-write audit counters (requires an interception layer, not Landlock
   alone).

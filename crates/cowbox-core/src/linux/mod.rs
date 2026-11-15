@@ -264,6 +264,18 @@ impl SandboxBackend for LinuxBackend {
         commit::commit_layers(layout, target_layers, options)
     }
 
+    fn recover_commit(&self, layout: &SessionLayout) -> Result<crate::RecoveryReport> {
+        commit::recover_latest(layout)
+    }
+
+    fn inspect_recovery(&self, layout: &SessionLayout) -> Result<Option<crate::PendingRecovery>> {
+        commit::inspect_recovery(layout)
+    }
+
+    fn finalize_commit(&self, layout: &SessionLayout) -> Result<()> {
+        commit::finalize_commit(layout)
+    }
+
     fn destroy_session(&self, layout: &SessionLayout) -> Result<()> {
         if !layout
             .session_dir

@@ -1,6 +1,6 @@
 ---
 name: cowbox-sandbox-workflow
-description: Use when the user explicitly asks for cowbox, or when a task involves multi-file refactors, dependency upgrades, database migrations, destructive shell commands, or untrusted scripts. Checkpoints each command, inspects net changes, and rolls back instead of stacking speculative fixes.
+description: Use when the user explicitly asks for cowbox, or when a task involves multi-file refactors, dependency upgrades, destructive shell commands, or local file-backed database changes. Checkpoints each command, inspects net changes, and rolls back instead of stacking speculative fixes.
 ---
 
 # Safe cowbox workflow
@@ -36,6 +36,12 @@ harnesses.
    files, lockfile corruption, or local database changes you did not intend.
 3. **Commit only clean work.** `cowbox commit` is a host write. Run it only
    after tests pass and the diff is minimal. Use `--dry-run` first when unsure.
+   After explicit human approval, run `cowbox commit --yes`; non-interactive
+   calls without `--yes` are refused.
+   If commit reports `COMMIT_RECOVERY_REQUIRED`, stop editing and run
+   `cowbox commit --recover --yes`. It restores the host before the durable
+   commit point or finalizes an already-applied commit; inspect any reported
+   host-drift conflicts instead of forcing recovery.
 4. **Do not commit `.git`.** cowbox never commits VCS metadata. Do not try to
    force it.
 5. **Respect the host read-only invariant.** Do not edit the host workspace
@@ -50,14 +56,15 @@ harnesses.
 Use cowbox for:
 
 - `rm -rf`, `git reset --hard`, bulk deletes and destructive scripts;
-- SQLite/Postgres migration scripts and local database resets;
+- local file-backed database migrations and resets (for example SQLite);
 - dependency installation or major upgrades;
 - refactors touching more than five files;
-- running an untrusted script, MCP tool, or generated migration;
 - tests that create local databases, caches, or background processes.
 
 Do not use cowbox for `ls`, `cat`, `rg`, `git status`, or other read-only
 commands. Do not use it for a single-file edit that does not touch local state.
+Do not use it as a malware sandbox: M1 does not isolate the network, undo
+remote database changes, or stop a process from exfiltrating readable files.
 
 ## Typical loop
 
@@ -76,7 +83,8 @@ cowbox rollback <clean-step>
 cowbox run -- cargo test
 cowbox diff
 cowbox commit --dry-run
-cowbox commit
+# After explicit human approval:
+cowbox commit --yes
 ```
 
 On Windows the project can stay at `E:\...`; `cowbox.exe` maps it into WSL. Do
@@ -118,4 +126,5 @@ cowbox stats --json
 This skill uses the CLI. The MCP proxy and synthetic `cowbox_diff` /
 `cowbox_rollback` / `cowbox_commit` tools are not part of M1.5; do not assume
 they exist. Codex Desktop built-in edits are outside this boundary until the
-native Windows backend lands.
+native Windows backend lands. Network isolation is also outside this boundary;
+cowbox protects workspace files, not remote services or exfiltrated data.

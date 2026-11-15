@@ -31,9 +31,14 @@ path.
 - `ask`: ask before starting a session when a risk trigger matches (default).
 - `auto`: start automatically when a risk trigger matches.
 
-Risk triggers include destructive shell commands, database migrations,
-dependency upgrades, refactors over five files, untrusted scripts/MCP, and
-stateful tests. Read-only commands do not use cowbox.
+Risk triggers include destructive shell commands, local file-backed database
+migrations, dependency upgrades, refactors over five files, and stateful tests.
+Read-only commands do not use cowbox. cowbox does not isolate the network or
+reverse remote database/service changes; do not present it as a malware sandbox.
+
+`cowbox commit` requires explicit human approval. Agents use
+`cowbox commit --yes` only after receiving that approval; non-interactive calls
+without `--yes` fail with `CONFIRMATION_REQUIRED`.
 
 ## Project rules
 

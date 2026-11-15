@@ -31,7 +31,8 @@ grep -w overlay /proc/filesystems
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-COWBOX_REQUIRE_SANDBOX=1 cargo test -p cowbox-core --test adversarial_suite -- --test-threads=1
+COWBOX_REQUIRE_SANDBOX=1 cargo test -p cowbox-cli --test adversarial_suite -- --test-threads=1
+bash scripts/smoke.sh
 ```
 
 Benchmarks:

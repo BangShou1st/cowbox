@@ -45,7 +45,10 @@ and multi-agent racing are later milestones and must not leak into M1 code.
 9. **Atomic commit ordering.** Delete removed paths in reverse depth order,
    create directories top-down, write regular files through same-directory temp
    files plus rename, and recreate symlinks last. Keep a journal and restore on
-   failure.
+   failure. The persisted `applied` phase is the commit point: recovery before
+   it restores the host, while recovery at or after it finalizes the commit.
+   Retain backups until the host restore or CLI session finalization has been
+   persisted.
 10. **Host read-only invariant.** During a session the host workspace is
     treated as read-only. The base lowerdir is live; `commit` must detect host
     drift against the base manifest and refuse unless `--force` is explicit.
@@ -92,9 +95,9 @@ Before claiming a task is complete:
 1. `cargo fmt --check`
 2. `cargo clippy --workspace --all-targets -- -D warnings`
 3. `cargo test --workspace`
-4. `COWBOX_REQUIRE_SANDBOX=1 cargo test -p cowbox-core --test adversarial_suite -- --test-threads=1`
+4. `COWBOX_REQUIRE_SANDBOX=1 cargo test -p cowbox-cli --test adversarial_suite -- --test-threads=1`
 5. Run the real CLI smoke path in a `/tmp` fixture:
-   `init → run → diff → rollback → commit --dry-run`.
+   `bash scripts/smoke.sh` (`init → run → diff → rollback → commit --dry-run`).
 6. If you touched the engine, run the relevant Criterion benchmark and update
    `docs/BENCHMARKS.md` with measured values only.
 

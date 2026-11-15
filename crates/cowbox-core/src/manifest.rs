@@ -16,6 +16,14 @@ pub struct ManifestEntry {
     pub size: u64,
     pub mtime_ns: i128,
     pub symlink_target: Option<PathBuf>,
+    #[serde(default)]
+    pub dev: Option<u64>,
+    #[serde(default)]
+    pub ino: Option<u64>,
+    #[serde(default)]
+    pub nlink: Option<u64>,
+    #[serde(default)]
+    pub xattr_digest: Option<String>,
 }
 
 impl ManifestEntry {
@@ -26,6 +34,11 @@ impl ManifestEntry {
         } else {
             None
         };
+        let xattr_digest = if matches!(kind, EntryKind::File | EntryKind::Directory) {
+            Some(crate::xattr::digest_checked(path)?)
+        } else {
+            None
+        };
         Ok(Self {
             rel_path,
             kind,
@@ -33,6 +46,10 @@ impl ManifestEntry {
             size: metadata.len(),
             mtime_ns: mtime_ns(metadata),
             symlink_target,
+            dev: matches!(kind, EntryKind::File).then(|| metadata.dev()),
+            ino: matches!(kind, EntryKind::File).then(|| metadata.ino()),
+            nlink: matches!(kind, EntryKind::File).then(|| metadata.nlink()),
+            xattr_digest,
         })
     }
 }
@@ -125,6 +142,21 @@ pub fn load_manifest(path: &Path) -> Result<BTreeMap<PathBuf, ManifestEntry>> {
     Ok(entries)
 }
 
+pub fn write_manifest(path: &Path, entries: &BTreeMap<PathBuf, ManifestEntry>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    for entry in entries.values() {
+        serde_json::to_writer(&mut writer, entry)?;
+        writer.write_all(b"\n")?;
+    }
+    writer.flush()?;
+    writer.get_ref().sync_all()?;
+    Ok(())
+}
+
 pub fn metadata_matches(entry: &ManifestEntry, path: &Path) -> bool {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
@@ -132,6 +164,24 @@ pub fn metadata_matches(entry: &ManifestEntry, path: &Path) -> bool {
     let kind = entry_kind(&metadata);
     if kind != entry.kind || (metadata.mode() & 0o7777) != entry.mode {
         return false;
+    }
+    if let (Some(dev), Some(ino)) = (entry.dev, entry.ino) {
+        if metadata.dev() != dev || metadata.ino() != ino {
+            return false;
+        }
+    }
+    if let Some(nlink) = entry.nlink {
+        if metadata.nlink() != nlink {
+            return false;
+        }
+    }
+    if let Some(expected) = &entry.xattr_digest {
+        let Some(actual) = crate::xattr::digest_lossy(path) else {
+            return false;
+        };
+        if &actual != expected {
+            return false;
+        }
     }
     match kind {
         EntryKind::File => metadata.len() == entry.size && mtime_ns(&metadata) == entry.mtime_ns,
@@ -160,6 +210,54 @@ pub fn top_layer_for(
             continue;
         }
         return Some((*step, candidate));
+    }
+    None
+}
+
+pub fn visible_path(
+    layout: &crate::layout::SessionLayout,
+    layers: &[u64],
+    rel_path: &Path,
+    base: &BTreeMap<PathBuf, ManifestEntry>,
+) -> Option<PathBuf> {
+    if let Some(path) = top_layer_visible_path(layout, layers, rel_path) {
+        return Some(path);
+    }
+    let host_path = layout.workspace.join(rel_path);
+    if base.contains_key(rel_path) && fs::symlink_metadata(&host_path).is_ok() {
+        Some(host_path)
+    } else {
+        None
+    }
+}
+
+pub fn top_layer_visible_path(
+    layout: &crate::layout::SessionLayout,
+    layers: &[u64],
+    rel_path: &Path,
+) -> Option<PathBuf> {
+    for step in layers.iter().rev() {
+        let upper = layout.upper_dir(*step);
+        let candidate = upper.join(rel_path);
+        if let Ok(metadata) = fs::symlink_metadata(&candidate) {
+            if crate::whiteout::is_whiteout_metadata(&metadata).is_some() {
+                return None;
+            }
+            return Some(candidate);
+        }
+        for ancestor in rel_path.ancestors().skip(1) {
+            let ancestor_path = upper.join(ancestor);
+            let Ok(metadata) = fs::symlink_metadata(&ancestor_path) else {
+                continue;
+            };
+            if crate::whiteout::is_whiteout_metadata(&metadata).is_some() {
+                return None;
+            }
+            if !metadata.is_dir() || crate::whiteout::is_opaque_directory(&ancestor_path, &metadata)
+            {
+                return None;
+            }
+        }
     }
     None
 }
