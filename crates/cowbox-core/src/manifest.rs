@@ -85,14 +85,35 @@ pub fn capture_base_manifest(root: &Path, output: &Path) -> Result<Vec<ManifestE
 }
 
 pub fn load_manifest(path: &Path) -> Result<BTreeMap<PathBuf, ManifestEntry>> {
+    load_manifest_where(path, |_| true)
+}
+
+pub(crate) fn load_manifest_filtered<F>(
+    path: &Path,
+    include: F,
+) -> Result<BTreeMap<PathBuf, ManifestEntry>>
+where
+    F: FnMut(&Path) -> bool,
+{
+    load_manifest_where(path, include)
+}
+
+fn load_manifest_where<F>(path: &Path, mut include: F) -> Result<BTreeMap<PathBuf, ManifestEntry>>
+where
+    F: FnMut(&Path) -> bool,
+{
     let file = File::open(path).map_err(|error| CoreError::StateCorrupted {
         step: 0,
         reason: format!("cannot open base manifest {}: {error}", path.display()),
     })?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut entries = BTreeMap::new();
-    for line in reader.lines() {
-        let line = line?;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
         if line.trim().is_empty() {
             continue;
         }
@@ -101,7 +122,9 @@ pub fn load_manifest(path: &Path) -> Result<BTreeMap<PathBuf, ManifestEntry>> {
                 step: 0,
                 reason: format!("invalid base manifest line: {error}"),
             })?;
-        entries.insert(entry.rel_path.clone(), entry);
+        if include(&entry.rel_path) {
+            entries.insert(entry.rel_path.clone(), entry);
+        }
     }
     Ok(entries)
 }

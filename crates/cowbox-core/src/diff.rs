@@ -63,7 +63,6 @@ pub fn compute_diff(
             "M1 only supports diffing from the session base (step 0)".to_string(),
         ));
     }
-    let base = manifest::load_manifest(&layout.base_manifest_path())?;
     let mut upserts: BTreeMap<PathBuf, LayerEntry> = BTreeMap::new();
     let mut deleted: BTreeSet<PathBuf> = BTreeSet::new();
     let mut opaque_dirs: BTreeSet<PathBuf> = BTreeSet::new();
@@ -119,6 +118,13 @@ pub fn compute_diff(
             }
         }
     }
+
+    let has_removals = !deleted.is_empty() || !opaque_dirs.is_empty();
+    let base = manifest::load_manifest_filtered(&layout.base_manifest_path(), |path| {
+        upserts.contains_key(path)
+            || has_path_or_ancestor_in(path, &deleted)
+            || has_path_or_ancestor_in(path, &opaque_dirs)
+    })?;
 
     let deleted_dirs: BTreeSet<PathBuf> = base
         .iter()
@@ -202,30 +208,32 @@ pub fn compute_diff(
         });
     }
 
-    for (rel_path, base_entry) in &base {
-        if upserts.contains_key(rel_path) {
-            continue;
+    if has_removals {
+        for (rel_path, base_entry) in &base {
+            if upserts.contains_key(rel_path) {
+                continue;
+            }
+            let removed = deleted.contains(rel_path)
+                || deleted_dirs.iter().any(|dir| rel_path.starts_with(dir))
+                || has_ancestor_in(rel_path, &opaque_dirs);
+            if !removed {
+                continue;
+            }
+            let excluded = is_excluded(rel_path, &options.excluded);
+            if excluded && !options.include_excluded {
+                continue;
+            }
+            changes.push(FileChange {
+                rel_path: rel_path.clone(),
+                kind: ChangeKind::Deleted,
+                entry_kind: base_entry.kind,
+                size_delta: -(i64::try_from(base_entry.size).unwrap_or(i64::MAX)),
+                lines_added: None,
+                lines_removed: None,
+                mode: Some(base_entry.mode),
+                excluded,
+            });
         }
-        let removed = deleted.contains(rel_path)
-            || deleted_dirs.iter().any(|dir| rel_path.starts_with(dir))
-            || has_ancestor_in(rel_path, &opaque_dirs);
-        if !removed {
-            continue;
-        }
-        let excluded = is_excluded(rel_path, &options.excluded);
-        if excluded && !options.include_excluded {
-            continue;
-        }
-        changes.push(FileChange {
-            rel_path: rel_path.clone(),
-            kind: ChangeKind::Deleted,
-            entry_kind: base_entry.kind,
-            size_delta: -(i64::try_from(base_entry.size).unwrap_or(i64::MAX)),
-            lines_added: None,
-            lines_removed: None,
-            mode: Some(base_entry.mode),
-            excluded,
-        });
     }
 
     changes.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
@@ -356,6 +364,13 @@ fn has_ancestor_in(path: &Path, ancestors: &BTreeSet<PathBuf>) -> bool {
     path.ancestors()
         .skip(1)
         .any(|ancestor| ancestors.contains(ancestor))
+}
+
+fn has_path_or_ancestor_in(path: &Path, candidates: &BTreeSet<PathBuf>) -> bool {
+    !candidates.is_empty()
+        && path
+            .ancestors()
+            .any(|candidate| candidates.contains(candidate))
 }
 
 fn is_excluded(path: &Path, excluded: &[String]) -> bool {

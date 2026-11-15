@@ -247,9 +247,8 @@ warm-up, and a fresh session for every sample.
 | Subsequent run with 1 parent layer | 38.43 ms | 38.55 ms |
 | `cowbox diff` with 10 changed files | 24.71 ms | 388.55 ms |
 
-Values are medians of complete CLI wall-clock durations. The implemented layer
-guard accepts a step with 150 parents, then rejects the next step with
-`CONFIG_ERROR`.
+Values are medians of complete CLI wall-clock durations. A 10,000-file step with
+150 parents is accepted, and the next step is rejected with `CONFIG_ERROR`.
 
 See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for full statistics, fixtures,
 machine details, caveats, and the exact rerun command. First-run P95 measured
