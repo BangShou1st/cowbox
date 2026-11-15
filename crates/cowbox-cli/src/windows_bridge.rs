@@ -43,7 +43,7 @@ fn delegate() -> CliResult<i32> {
 
     let mut command = Command::new("wsl.exe");
     command
-        .args(["-d", &distro, "--cd", &cwd_text, "--", "bash", "-lc"])
+        .args(["-d", &distro, "--cd", &cwd_text, "--exec", "bash", "-lc"])
         .arg("exec \"$0\" \"$@\"")
         .arg(&linux_binary)
         .args(args);
@@ -72,7 +72,7 @@ fn resolve_linux_binary(distro: &str, wsl: &WslConfig) -> CliResult<String> {
         "command -v cowbox || printf %s \"$HOME/.local/bin/cowbox\""
     };
     let output = Command::new("wsl.exe")
-        .args(["-d", distro, "--", "bash", "-lc", query])
+        .args(["-d", distro, "--exec", "bash", "-lc", query])
         .output()?;
     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if path.starts_with('/') {
@@ -94,7 +94,7 @@ pub fn doctor(args: &DoctorArgs) -> CliResult<i32> {
         .args([
             "-d",
             &distro,
-            "--",
+            "--exec",
             "bash",
             "-lc",
             "exec \"$0\" doctor --json",

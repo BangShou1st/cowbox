@@ -180,7 +180,7 @@ fn install_linux_tarball(archive: &[u8], distro: &str) -> CliResult<()> {
         .args([
             "-d",
             distro,
-            "--",
+            "--exec",
             "bash",
             "-lc",
             "mkdir -p \"$HOME/.local/bin\" && tar -xzf - -C \"$HOME/.local/bin\" && chmod +x \"$HOME/.local/bin/cowbox\"",
@@ -204,7 +204,7 @@ fn query_linux_binary(distro: &str) -> CliResult<String> {
         .args([
             "-d",
             distro,
-            "--",
+            "--exec",
             "bash",
             "-lc",
             "printf %s \"$HOME/.local/bin/cowbox\"",
@@ -235,7 +235,7 @@ fn run_wsl_doctor(distro: &str, linux_binary: &str) -> CliResult<Value> {
         .args([
             "-d",
             distro,
-            "--",
+            "--exec",
             "bash",
             "-lc",
             "exec \"$0\" doctor --json",
