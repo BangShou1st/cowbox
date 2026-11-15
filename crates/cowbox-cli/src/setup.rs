@@ -67,7 +67,7 @@ pub fn run(args: &SetupArgs) -> CliResult<i32> {
             .version
             .clone()
             .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-        let release = fetch_release(&version)?;
+        let release = release_asset(&version);
         let archive = download(&release.linux_url)?;
         let checksum = download(&release.sha_url)?;
         verify_checksum(&archive, &checksum)?;
@@ -120,70 +120,16 @@ fn wsl_available() -> CliResult<bool> {
 }
 
 #[cfg(windows)]
-fn fetch_release(version: &str) -> CliResult<ReleaseAsset> {
-    let tag = if version.starts_with('v') {
-        version.to_string()
-    } else {
-        format!("v{version}")
-    };
-    let url = format!("https://api.github.com/repos/BangShou1st/cowbox/releases/tags/{tag}");
-    let response = ureq::get(&url)
-        .set("User-Agent", "cowbox")
-        .call()
-        .map_err(|error| {
-            CliError::new(
-                "RELEASE_NOT_FOUND",
-                format!("cannot find cowbox release {tag}: {error}"),
-            )
-        })?;
-    let value: Value = response.into_json().map_err(|error| {
-        CliError::new(
-            "RELEASE_INVALID",
-            format!("invalid release response: {error}"),
-        )
-    })?;
-    let assets = value["assets"]
-        .as_array()
-        .ok_or_else(|| CliError::new("RELEASE_INVALID", "release has no asset list"))?;
-    let linux_url = assets
-        .iter()
-        .find(|asset| {
-            asset["name"]
-                .as_str()
-                .is_some_and(|name| name.ends_with("x86_64-unknown-linux-gnu.tar.gz"))
-        })
-        .and_then(|asset| asset["browser_download_url"].as_str())
-        .ok_or_else(|| {
-            CliError::new(
-                "ASSET_NOT_FOUND",
-                format!("release {tag} has no x86_64 Linux tarball"),
-            )
-        })?
-        .to_string();
-    let sha_url = assets
-        .iter()
-        .find(|asset| {
-            asset["name"]
-                .as_str()
-                .is_some_and(|name| name.ends_with("x86_64-unknown-linux-gnu.tar.gz.sha256"))
-        })
-        .and_then(|asset| asset["browser_download_url"].as_str())
-        .ok_or_else(|| {
-            CliError::new(
-                "ASSET_NOT_FOUND",
-                format!("release {tag} has no Linux checksum"),
-            )
-        })?
-        .to_string();
-    Ok(ReleaseAsset {
-        version: value["tag_name"]
-            .as_str()
-            .unwrap_or(&tag)
-            .trim_start_matches('v')
-            .to_string(),
-        linux_url,
-        sha_url,
-    })
+fn release_asset(version: &str) -> ReleaseAsset {
+    let version = version.trim_start_matches('v');
+    let tag = format!("v{version}");
+    let base = format!("https://github.com/BangShou1st/cowbox/releases/download/{tag}");
+    let asset = format!("cowbox-{tag}-x86_64-unknown-linux-gnu.tar.gz");
+    ReleaseAsset {
+        version: version.to_string(),
+        linux_url: format!("{base}/{asset}"),
+        sha_url: format!("{base}/{asset}.sha256"),
+    }
 }
 
 #[cfg(windows)]
