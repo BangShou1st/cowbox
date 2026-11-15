@@ -166,5 +166,11 @@ jobs:
       - name: Build release launcher
         run: cargo build -p cowbox-cli --release
 
+      - name: Upload Windows launcher
+        uses: actions/upload-artifact@v4
+        with:
+          name: cowbox-windows-ci
+          path: target/release/cowbox.exe
+
       - name: CLI smoke
         run: .\target\release\cowbox.exe --help
