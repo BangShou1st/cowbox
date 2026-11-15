@@ -208,11 +208,11 @@ Text line counts are optional and capped by `max_line_stat_files` and
 ## 8. Observability
 
 `tracing` spans cover namespace setup, mount, Landlock, diff, and commit.
-`--trace-chrome` emits a Chrome Trace JSON file. `doctor` runs real capability
-probes (namespace, overlay, `userxattr`, Landlock ABI, whiteout kind, state
-filesystem, disk space) plus a small latency sanity check. `stats` reports step
-count, rollback count, reaped orphans, incremental disk use, and whether
-network isolation is active.
+`--trace-chrome` emits a Chrome Trace JSON file. `doctor` runs static capability
+probes (namespace, overlay, `userxattr`, Landlock ABI, state filesystem, disk
+space); the whiteout kind is confirmed by the first real run, and latency is
+measured by `scripts/bench.sh`. `stats` reports step count, rollback count,
+reaped orphans, incremental disk use, and whether network isolation is active.
 
 M1 does **not** count blocked writes: Landlock denials are silent. The field is
 reported as not instrumented rather than invented.

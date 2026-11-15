@@ -176,10 +176,11 @@ methodology live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 | Scenario | Fixture | Target (P99) | Measured |
 | --- | --- | --- | --- |
-| Cold OverlayFS mount | 10,000 files | < 5 ms | TBD |
-| Step freeze | 10,000 files | < 10 ms | TBD |
-| Diff scan (10 changed files) | 10,000 files | < 25 ms | TBD |
-| Rollback (DAG pointer) | 10,000 files | < 5 ms | TBD |
+| Cold OverlayFS mount | 10,000 files | < 5 ms | TBD (pure mount not separately instrumented) |
+| Step freeze | 10,000 files | < 10 ms | TBD (pure freeze not separately instrumented) |
+| Diff scan (10 changed files) | 10,000 files | < 25 ms | 15.35 ms (13.6–17.6 ms) |
+| Rollback (DAG pointer) | 10,000 files | < 5 ms | 11.3 ns (11.1–11.5 ns) |
+| End-to-end `cowbox run -- true` | 10,000 files | no hard target | 40.4 ms (39.0–41.7 ms, includes CLI/namespace/mount) |
 
 These are targets, not claims. The measured column is filled after
 `scripts/bench.sh` runs in WSL2 ext4.

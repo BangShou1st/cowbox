@@ -88,7 +88,7 @@ jobs:
       - name: Adversarial sandbox suite
         env:
           COWBOX_REQUIRE_SANDBOX: "1"
-        run: cargo test -p cowbox-core --test adversarial_suite -- --test-threads=1
+        run: cargo test -p cowbox-cli --test adversarial_suite -- --test-threads=1
 
       - name: CLI smoke
         run: |
