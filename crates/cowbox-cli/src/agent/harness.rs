@@ -161,10 +161,18 @@ where
         .paths
         .iter()
         .filter_map(|spec| match spec.base {
-            PathBase::Home => Some(home.join(spec.relative)),
-            PathBase::Env(name) => env(name).map(|root| root.join(spec.relative)),
+            PathBase::Home => Some(join_relative(home, spec.relative)),
+            PathBase::Env(name) => env(name).map(|root| join_relative(&root, spec.relative)),
         })
         .collect()
+}
+
+fn join_relative(base: &std::path::Path, relative: &str) -> PathBuf {
+    let mut path = base.to_path_buf();
+    for component in relative.split('/') {
+        path.push(component);
+    }
+    path
 }
 
 pub fn detected(paths: &[PathBuf]) -> bool {
