@@ -174,7 +174,7 @@ See [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md) for the full threat model.
 We only publish numbers that were measured on a real machine. The harness and
 methodology live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-| Scenario | Fixture | Target (P99) | Measured |
+| Scenario | Fixture | Target | Measured (Criterion mean) |
 | --- | --- | --- | --- |
 | Cold OverlayFS mount | 10,000 files | < 5 ms | TBD (pure mount not separately instrumented) |
 | Step freeze | 10,000 files | < 10 ms | TBD (pure freeze not separately instrumented) |
@@ -184,6 +184,8 @@ methodology live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 These are targets, not claims. The measured column is filled after
 `scripts/bench.sh` runs in WSL2 ext4.
+
+M1 reports Criterion means and ranges; P99 is not separately instrumented yet.
 
 ## Status and roadmap
 
