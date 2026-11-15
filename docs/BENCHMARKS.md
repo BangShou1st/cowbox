@@ -121,6 +121,31 @@ Samples use warm page cache. P95 uses nearest rank, which is the 19th sorted
 sample for `n=20`. No sample is removed or winsorized. The final formal run used
 `--depths 1`; it still executed the full layer-limit probe.
 
+### Paired first-run A/B
+
+Pass `--baseline-binary` to compare first runs with an explicit baseline. The
+paired mode measures only `run` at step 1 and rejects `--depths`. Both binaries
+use the same fixture for each file count, the same measured sample count, and
+one warm-up pair. Odd pairs run baseline then candidate, while even pairs run
+candidate then baseline. Each command receives a fresh isolated state root.
+
+```bash
+python3 scripts/bench_m2.py \
+  --binary /path/to/candidate-cowbox \
+  --baseline-binary /path/to/baseline-cowbox \
+  --file-counts 10000 200000 \
+  --samples 20 --warmups 1 \
+  --json-output /absolute/results/cowbox-m2-paired-first-run-YYYYMMDDTHHMMSSZ.json \
+  --markdown-output /absolute/results/cowbox-m2-paired-first-run-YYYYMMDDTHHMMSSZ.md
+```
+
+Use a new timestamped output prefix for every run so earlier raw samples remain
+intact. JSON records both absolute binary paths and SHA-256 values, every pair's
+order and timings, machine load, and filesystem details. Pair samples retain full
+`perf_counter` precision internally. Summaries, P95 values, and paired deltas use
+those unrounded values, while per-pair display values are rounded to three
+decimal places during serialization.
+
 ## File-count results
 
 | Scenario | Files | Baseline median | Final median | Baseline P95 | Final P95 |
@@ -184,6 +209,52 @@ CONFIG_ERROR: session has 151 layers; M1 supports at most 150. Commit or discard
 ```
 
 The head remained at step 151 and no step 152 directory was created.
+
+## Paired first-run A/B result
+
+One serial paired run compared the first-run experiment candidate at source
+commit `5c133ea9c6a4ded777161099ed0c2aaa222f909d` with the diff candidate. Each
+file count used one shared ext4 fixture, 20 formal pairs, and one excluded
+warm-up pair. Odd pairs ran baseline then candidate; even pairs ran candidate
+then baseline. Every formal command ran in a fresh state and returned step 1.
+No sample was removed.
+
+| Binary | Path | SHA-256 |
+| --- | --- | --- |
+| Diff baseline | `/home/bangshou/cowbox-bench-results/m2-diff-final/bin/cowbox-m2-diff-152fd440` | `152fd4407df4047a2765a37c4daa9d6372ac9cb64b643d9f6a71a109c342d451` |
+| First-run candidate | `/home/bangshou/cowbox-bench-results/m2-firstrun-final/bin/cowbox-firstrun-final` | `f959b263c1e1c15567fb5a09a71864ecb39584ffc1f9aefa8cb150f793fd1b91` |
+
+Cells contain median (P95) in milliseconds. The paired delta is candidate minus
+baseline for each pair.
+
+| Files | Baseline median | Candidate median | Paired delta median | Baseline P95 | Candidate P95 | Paired delta P95 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10,000 | 59.567 | **63.074** | -1.262 | 81.352 | 76.774 | 16.449 |
+| 200,000 | 164.506 | **138.700** | -26.219 | 432.140 | 144.551 | -15.888 |
+
+The 10,000-file candidate median was 3.074 ms above the 60 ms target, while
+its P95 was below 80 ms. The 200,000-file candidate passed the 150 ms median
+and 200 ms P95 targets at 138.700 and 144.551 ms. Two baseline 200,000-file
+samples produced large tail values, while the candidate remained between
+129.040 and 145.102 ms. This is one run and is retained as observed.
+
+The run started at load average `0.222, 0.475, 0.719` and ended at
+`0.327, 0.485, 0.719` on the 8-vCPU WSL profile above. Artifacts use the new
+timestamp prefix `cowbox-m2-paired-first-run-20261115T203256Z`:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Raw JSON | `34d1630a86c96af712ea5d4777ccd524304e9c3de0205f057b2183ebc6ea18b6` |
+| Markdown | `0bea0fc91a5c56423847456788683f78fc32d9f4278eec12bbd87f3ec86661fe` |
+| Run log | `fe73ad7837ec4b44a4ed55eb74ccc88f473501eedf25c6d5c3f9cdbc015cd593` |
+| Verification | `8bef72084b0f40e2be087a7e1713d0ef21093e4305b4b2deac223faa5c928291` |
+| Precision check | `b7a32173a57852e29e8cef69a6bb7e588d5e62cba03be57e16e5730f0463ab2a` |
+| Compatibility check | `9b1824528f0bb498633fd77d02aeebe14de519d3a51cbd19ec0409d8deedafdc` |
+
+A separate compatibility check rendered an existing raw result with the
+pre-change and final default-mode Markdown paths and compared them byte for
+byte. It also confirmed default depths `1 60 149`, 20 samples, one warm-up, and
+an explicit exit code 1 for a non-executable baseline.
 
 ## Diff optimization round
 

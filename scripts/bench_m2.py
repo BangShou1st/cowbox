@@ -30,9 +30,19 @@ def parse_args() -> argparse.Namespace:
         description="Measure cowbox M2 CLI scenarios on a local ext4 filesystem."
     )
     parser.add_argument("--binary", required=True, type=Path)
+    parser.add_argument(
+        "--baseline-binary",
+        type=Path,
+        help="baseline binary for alternating first-run A/B",
+    )
     parser.add_argument("--root", type=Path)
     parser.add_argument("--file-counts", nargs="+", type=int, default=[10_000, 200_000])
-    parser.add_argument("--depths", nargs="+", type=int, default=[1, 60, 149])
+    parser.add_argument(
+        "--depths",
+        nargs="+",
+        type=int,
+        help="layer depths for the full single-binary protocol",
+    )
     parser.add_argument("--samples", type=int, default=20)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=int, default=600)
@@ -41,6 +51,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--markdown-output", type=Path)
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args()
+    if args.depths is None:
+        args.depths = [] if args.baseline_binary is not None else [1, 60, 149]
+    elif args.baseline_binary is not None:
+        parser.error(
+            "--depths cannot be used with --baseline-binary; "
+            "paired mode measures only the first run"
+        )
     if args.samples < 1:
         parser.error("--samples must be at least 1")
     if args.warmups < 0:
@@ -271,6 +288,15 @@ def binary_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
+def binary_metadata(repo: Path, binary: Path) -> dict[str, Any]:
+    return {
+        "path": str(binary),
+        "version": command_output([str(binary), "--version"], repo),
+        "sha256": binary_digest(binary),
+        "size_bytes": binary.stat().st_size,
+    }
+
+
 def collect_environment(repo: Path, binary: Path, bench_root: Path) -> dict[str, Any]:
     filesystem, source = filesystem_for(bench_root)
     return {
@@ -296,12 +322,7 @@ def collect_environment(repo: Path, binary: Path, bench_root: Path) -> dict[str,
             "rustc": command_output(["rustc", "--version"], repo),
             "cargo": command_output(["cargo", "--version"], repo),
         },
-        "binary": {
-            "path": str(binary),
-            "version": command_output([str(binary), "--version"], repo),
-            "sha256": binary_digest(binary),
-            "size_bytes": binary.stat().st_size,
-        },
+        "binary": binary_metadata(repo, binary),
     }
 
 
@@ -355,6 +376,128 @@ def measure_first_run(
     for _ in range(warmups):
         sample()
     return summarize([sample() for _ in range(samples)])
+
+
+def paired_binary_order(pair_number: int) -> tuple[str, str]:
+    if pair_number < 1:
+        raise BenchmarkError("paired benchmark sample numbers start at 1")
+    if pair_number % 2 == 1:
+        return "baseline", "candidate"
+    return "candidate", "baseline"
+
+
+def measure_paired_first_run(
+    candidate_binary: Path,
+    baseline_binary: Path,
+    workspace: Path,
+    state_base: Path,
+    samples: int,
+    warmups: int,
+    timeout: int,
+) -> dict[str, Any]:
+    binaries = {
+        "candidate": candidate_binary,
+        "baseline": baseline_binary,
+    }
+
+    def sample(side: str, phase: str, pair_number: int) -> float:
+        with SampleState(state_base, f"{phase}-{side}", pair_number) as state:
+            elapsed, envelope, _process = invoke_json(
+                binaries[side],
+                workspace,
+                state,
+                ["run", "--json", "--", "true"],
+                timeout,
+            )
+            if envelope.get("data", {}).get("step") != 1:
+                raise BenchmarkError(
+                    f"{side} first run did not create step 1: {envelope}"
+                )
+            return elapsed
+
+    for pair_number in range(1, warmups + 1):
+        for side in paired_binary_order(pair_number):
+            sample(side, "warmup", pair_number)
+
+    pairs = []
+    pair_timings = []
+    for pair_number in range(1, samples + 1):
+        order = paired_binary_order(pair_number)
+        pair: dict[str, Any] = {
+            "pair": pair_number,
+            "order": list(order),
+        }
+        timings = {
+            side: sample(side, "formal", pair_number)
+            for side in order
+        }
+        for side in order:
+            pair[side] = {
+                "elapsed_ms": round(timings[side], 3),
+                "step": 1,
+            }
+        pairs.append(pair)
+        pair_timings.append(timings)
+
+    candidate_samples = [timings["candidate"] for timings in pair_timings]
+    baseline_samples = [timings["baseline"] for timings in pair_timings]
+    paired_deltas = [
+        candidate - baseline
+        for candidate, baseline in zip(candidate_samples, baseline_samples, strict=True)
+    ]
+    return {
+        "pairs": pairs,
+        "candidate": summarize(candidate_samples),
+        "baseline": summarize(baseline_samples),
+        "paired_delta_candidate_minus_baseline": summarize(paired_deltas),
+    }
+
+
+def benchmark_paired_first_run(
+    candidate_binary: Path,
+    baseline_binary: Path,
+    bench_root: Path,
+    file_counts: Sequence[int],
+    samples: int,
+    warmups: int,
+    timeout: int,
+) -> list[dict[str, Any]]:
+    results = []
+    for files in file_counts:
+        print(f"[paired] preparing shared {files:,}-file fixture", flush=True)
+        workspace, _changed = prepare_fixture(
+            bench_root / "fixtures", files, candidate_binary, timeout
+        )
+        with SampleState(
+            bench_root / "setup-states", f"baseline-preflight-{files}", 0
+        ) as state:
+            verify_preflight(baseline_binary, workspace, state, timeout)
+        state_base = bench_root / "sample-states" / f"paired-{files}"
+        state_base.mkdir(parents=True)
+        paired = measure_paired_first_run(
+            candidate_binary,
+            baseline_binary,
+            workspace,
+            state_base,
+            samples,
+            warmups,
+            timeout,
+        )
+        results.append(
+            {
+                "files": files,
+                **paired,
+            }
+        )
+        shutil.rmtree(workspace)
+        shutil.rmtree(state_base)
+        print(
+            f"[paired] {files:,}: baseline={paired['baseline']['median_ms']:.2f} ms "
+            f"candidate={paired['candidate']['median_ms']:.2f} ms "
+            f"delta={paired['paired_delta_candidate_minus_baseline']['median_ms']:.2f} ms",
+            flush=True,
+        )
+    return results
 
 
 def measure_subsequent_run(
@@ -690,7 +833,50 @@ def probe_layer_limit(
     return result
 
 
+def paired_result_markdown(result: dict[str, Any]) -> str:
+    lines = [
+        "# cowbox M2 paired first-run benchmark",
+        "",
+        f"Generated: `{result['generated_at']}`",
+        "",
+        "## Configuration",
+        "",
+        f"- Candidate binary: `{result['binary']['path']}`",
+        f"- Candidate version: `{result['binary']['version']}`",
+        f"- Candidate SHA-256: `{result['binary']['sha256']}`",
+        f"- Baseline binary: `{result['baseline_binary']['path']}`",
+        f"- Baseline version: `{result['baseline_binary']['version']}`",
+        f"- Baseline SHA-256: `{result['baseline_binary']['sha256']}`",
+        f"- Git HEAD: `{result['source']['git_head']}`",
+        f"- Kernel: `{result['machine']['kernel']}`",
+        f"- Filesystem: `{result['filesystem']['type']}`",
+        f"- Paired samples per file count: {result['settings']['samples']}",
+        f"- Warm-up pairs per file count: {result['settings']['warmups']}",
+        "- Scope: first run only; every side starts with a fresh isolated state",
+        "- Pair order: odd pairs run baseline then candidate; even pairs run candidate then baseline",
+        "- Paired delta: candidate minus baseline",
+        "",
+        "## First-run pairs",
+        "",
+        "| Files | Baseline median (P95) | Candidate median (P95) | Paired delta median (P95) |",
+        "| ---: | ---: | ---: | ---: |",
+    ]
+    for group in result["paired_first_run"]:
+        baseline = group["baseline"]
+        candidate = group["candidate"]
+        delta = group["paired_delta_candidate_minus_baseline"]
+        lines.append(
+            f"| {group['files']:,} "
+            f"| {baseline['median_ms']:.2f} ms ({baseline['p95_ms']:.2f} ms) "
+            f"| {candidate['median_ms']:.2f} ms ({candidate['p95_ms']:.2f} ms) "
+            f"| {delta['median_ms']:+.2f} ms ({delta['p95_ms']:+.2f} ms) |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def result_markdown(result: dict[str, Any]) -> str:
+    if "paired_first_run" in result:
+        return paired_result_markdown(result)
     lines = [
         "# cowbox M2 benchmark run",
         "",
@@ -775,6 +961,14 @@ def main() -> int:
     binary = args.binary.resolve()
     if not binary.is_file() or not os.access(binary, os.X_OK):
         raise BenchmarkError(f"cowbox binary is missing or not executable: {binary}")
+    baseline_binary = None
+    if args.baseline_binary is not None:
+        baseline_binary = args.baseline_binary.resolve()
+        if not baseline_binary.is_file() or not os.access(baseline_binary, os.X_OK):
+            raise BenchmarkError(
+                "--baseline-binary is missing or not executable: "
+                f"{baseline_binary}"
+            )
     if args.root:
         bench_root = args.root.resolve()
         if bench_root.exists() and any(bench_root.iterdir()):
@@ -809,46 +1003,72 @@ def main() -> int:
             "percentile": "nearest-rank",
         },
     }
+    if baseline_binary is not None:
+        result["settings"]["mode"] = "paired_first_run"
     result.update(collect_environment(repo, binary, bench_root))
-    print(
-        f"cowbox M2 benchmark: {result['binary']['version']} "
-        f"sha256={result['binary']['sha256'][:12]} fs={filesystem}",
-        flush=True,
-    )
+    if baseline_binary is not None:
+        result["baseline_binary"] = binary_metadata(repo, baseline_binary)
+        print(
+            "cowbox M2 paired first-run benchmark: "
+            f"candidate_sha256={result['binary']['sha256'][:12]} "
+            f"baseline_sha256={result['baseline_binary']['sha256'][:12]} "
+            f"fs={filesystem}",
+            flush=True,
+        )
+    else:
+        print(
+            f"cowbox M2 benchmark: {result['binary']['version']} "
+            f"sha256={result['binary']['sha256'][:12]} fs={filesystem}",
+            flush=True,
+        )
 
     succeeded = False
     try:
-        result["file_counts"] = benchmark_file_counts(
-            binary,
-            bench_root,
-            args.file_counts,
-            args.samples,
-            args.warmups,
-            args.timeout_seconds,
-        )
-        depth_file_count = 10_000
-        print(f"[depth] preparing shared {depth_file_count:,}-file fixture", flush=True)
-        fixture_workspace, _changed = prepare_fixture(
-            bench_root / "fixtures",
-            depth_file_count,
-            binary,
-            args.timeout_seconds,
-        )
-        result["depths"] = benchmark_depths(
-            binary,
-            fixture_workspace,
-            bench_root,
-            args.depths,
-            args.samples,
-            args.warmups,
-            args.timeout_seconds,
-        )
-        result["layer_limit"] = probe_layer_limit(
-            binary,
-            fixture_workspace,
-            bench_root / "sample-states" / "limit",
-            args.timeout_seconds,
-        )
+        if baseline_binary is not None:
+            result["paired_first_run"] = benchmark_paired_first_run(
+                binary,
+                baseline_binary,
+                bench_root,
+                args.file_counts,
+                args.samples,
+                args.warmups,
+                args.timeout_seconds,
+            )
+        else:
+            result["file_counts"] = benchmark_file_counts(
+                binary,
+                bench_root,
+                args.file_counts,
+                args.samples,
+                args.warmups,
+                args.timeout_seconds,
+            )
+            depth_file_count = 10_000
+            print(
+                f"[depth] preparing shared {depth_file_count:,}-file fixture",
+                flush=True,
+            )
+            fixture_workspace, _changed = prepare_fixture(
+                bench_root / "fixtures",
+                depth_file_count,
+                binary,
+                args.timeout_seconds,
+            )
+            result["depths"] = benchmark_depths(
+                binary,
+                fixture_workspace,
+                bench_root,
+                args.depths,
+                args.samples,
+                args.warmups,
+                args.timeout_seconds,
+            )
+            result["layer_limit"] = probe_layer_limit(
+                binary,
+                fixture_workspace,
+                bench_root / "sample-states" / "limit",
+                args.timeout_seconds,
+            )
         result["machine"]["load_average_at_end"] = [
             round(value, 3) for value in os.getloadavg()
         ]
