@@ -1,11 +1,14 @@
+use crate::agent::{config as agent_config, harness, policy, rules, skill};
 use crate::cli::{
-    CliCommand, CommitArgs, DiffArgs, DiscardArgs, DoctorArgs, HiddenArgs, InitArgs, LogArgs,
-    RollbackArgs, RunArgs, StatsArgs, UndoArgs,
+    CliCommand, CommitArgs, DiffArgs, DiscardArgs, DoctorArgs, HiddenArgs, InitArgs,
+    InstallRulesArgs, InstallSkillArgs, LogArgs, PathArgs, PolicyArgs, RollbackArgs, RunArgs,
+    SetupArgs, StatsArgs, UndoArgs, UpdateArgs,
 };
 use crate::config::{Config, RunPolicyOverrides};
 use crate::error::{CliError, CliResult};
 use crate::json;
 use crate::render::{self, Stats};
+use crate::setup;
 use crate::state::{SessionRecord, SessionStatus, SessionStore};
 use crate::workspace;
 use cowbox_core::{SandboxBackend, SessionLayout};
@@ -23,6 +26,11 @@ struct Context {
 }
 
 pub fn dispatch(command: &CliCommand) -> CliResult<i32> {
+    #[cfg(windows)]
+    if let Some(result) = crate::windows_bridge::delegate_if_needed(command) {
+        return result;
+    }
+
     match command {
         CliCommand::Init(args) => command_init(args),
         CliCommand::Run(args) => command_run(args),
@@ -34,6 +42,12 @@ pub fn dispatch(command: &CliCommand) -> CliResult<i32> {
         CliCommand::Discard(args) => command_discard(args),
         CliCommand::Doctor(args) => command_doctor(args),
         CliCommand::Stats(args) => command_stats(args),
+        CliCommand::Setup(args) => command_setup(args),
+        CliCommand::InstallSkill(args) => command_install_skill(args),
+        CliCommand::InstallRules(args) => command_install_rules(args),
+        CliCommand::Policy(args) => command_policy(args),
+        CliCommand::Update(args) => command_update(args),
+        CliCommand::Path(args) => command_path(args),
         CliCommand::SandboxExec(args) => command_hidden(args, true),
         CliCommand::Supervisor(args) => command_hidden(args, false),
     }
@@ -73,6 +87,14 @@ fn command_init(args: &InitArgs) -> CliResult<i32> {
     } else {
         println!("wrote {}", path.display());
         println!("next: cowbox doctor");
+    }
+    if args.agent {
+        let results = rules::install(&workspace, false, false)?;
+        if !args.json {
+            for result in results {
+                println!("{}: {}", result.path.display(), result.action);
+            }
+        }
     }
     Ok(0)
 }
@@ -430,22 +452,29 @@ fn command_discard(args: &DiscardArgs) -> CliResult<i32> {
 }
 
 fn command_doctor(args: &DoctorArgs) -> CliResult<i32> {
-    let ctx = setup()?;
-    let capabilities = backend().probe(&ctx.state_root)?;
-    let ready = capabilities.user_namespace
-        && capabilities.overlayfs
-        && capabilities.userxattr
-        && capabilities.landlock_abi.is_some();
-    if args.json {
-        json::print(&json::ok(
-            "doctor",
-            None,
-            json!({ "ready": ready, "capabilities": capabilities }),
-        ))?;
-    } else {
-        render::print_doctor(&capabilities, &ctx.state_root, ready);
+    #[cfg(windows)]
+    {
+        crate::windows_bridge::doctor(args)
     }
-    Ok(if ready { 0 } else { 1 })
+    #[cfg(not(windows))]
+    {
+        let ctx = setup()?;
+        let capabilities = backend().probe(&ctx.state_root)?;
+        let ready = capabilities.user_namespace
+            && capabilities.overlayfs
+            && capabilities.userxattr
+            && capabilities.landlock_abi.is_some();
+        if args.json {
+            json::print(&json::ok(
+                "doctor",
+                None,
+                json!({ "ready": ready, "capabilities": capabilities }),
+            ))?;
+        } else {
+            render::print_doctor(&capabilities, &ctx.state_root, ready);
+        }
+        Ok(if ready { 0 } else { 1 })
+    }
 }
 
 fn command_stats(args: &StatsArgs) -> CliResult<i32> {
@@ -490,6 +519,223 @@ fn command_stats(args: &StatsArgs) -> CliResult<i32> {
         render::print_stats(&stats);
     }
     Ok(0)
+}
+
+fn command_setup(args: &SetupArgs) -> CliResult<i32> {
+    setup::run(args)
+}
+
+fn command_install_skill(args: &InstallSkillArgs) -> CliResult<i32> {
+    let home = agent_config::home_dir()?;
+    if args.list {
+        return list_harnesses(&home, args.json);
+    }
+    if args.all && !args.harness.is_empty() {
+        return Err(CliError::new("USAGE", "--all and --harness are mutually exclusive").exit(2));
+    }
+
+    let selected = if args.all {
+        harness::ALL_HARNESSES.iter().collect::<Vec<_>>()
+    } else if !args.harness.is_empty() {
+        let mut selected = Vec::new();
+        for id in &args.harness {
+            let found = harness::find(id).ok_or_else(|| {
+                CliError::new("UNKNOWN_HARNESS", format!("unknown harness {id}"))
+                    .hint("run `cowbox install-skill --list`")
+                    .exit(2)
+            })?;
+            selected.push(found);
+        }
+        selected
+    } else {
+        harness::ALL_HARNESSES
+            .iter()
+            .filter(|item| {
+                item.paths
+                    .iter()
+                    .map(|spec| match spec.base {
+                        harness::PathBase::Home => home.join(spec.relative),
+                        harness::PathBase::Env(name) => std::env::var_os(name)
+                            .map(|root| std::path::PathBuf::from(root).join(spec.relative))
+                            .unwrap_or_default(),
+                    })
+                    .any(|path| harness::detected(std::slice::from_ref(&path)))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if selected.is_empty() {
+        return Err(
+            CliError::new("NO_HARNESS", "no supported agent harness was detected")
+                .hint("use --all or --harness <id>")
+                .exit(2),
+        );
+    }
+
+    let mut targets = Vec::new();
+    for item in &selected {
+        for path in harness::resolve_paths(item, &home) {
+            targets.push((item.id, path.join("cowbox")));
+        }
+    }
+    let paths = targets
+        .iter()
+        .map(|(_, path)| path.clone())
+        .collect::<Vec<_>>();
+    if let Some(mode) = args.mode {
+        if !args.dry_run {
+            agent_config::set_global_mode(mode)?;
+        }
+    }
+    let results = skill::install_paths(&paths, args.force, args.dry_run)?;
+    if args.json {
+        let items = results
+            .iter()
+            .map(|result| {
+                json!({
+                    "path": result.path,
+                    "status": result.status,
+                })
+            })
+            .collect::<Vec<_>>();
+        json::print(&json::ok(
+            "install-skill",
+            None,
+            json!({
+                "mode": args.mode,
+                "dry_run": args.dry_run,
+                "installed": items,
+            }),
+        ))?;
+    } else {
+        for result in results {
+            println!("{}: {}", result.path.display(), result.status);
+        }
+        if let Some(mode) = args.mode {
+            println!("global trigger mode set to {mode:?}");
+        }
+    }
+    Ok(0)
+}
+
+fn list_harnesses(home: &std::path::Path, json_mode: bool) -> CliResult<i32> {
+    let mut items = Vec::new();
+    for item in harness::ALL_HARNESSES {
+        let paths = harness::resolve_paths(item, home);
+        let is_detected = harness::detected(&paths);
+        items.push((item, paths, is_detected));
+    }
+    if json_mode {
+        let entries = items
+            .iter()
+            .map(|(item, paths, is_detected)| {
+                json!({
+                    "id": item.id,
+                    "display": item.display,
+                    "paths": paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+                    "detected": is_detected,
+                })
+            })
+            .collect::<Vec<_>>();
+        json::print(&json::ok(
+            "install-skill",
+            None,
+            json!({ "harnesses": entries }),
+        ))?;
+    } else {
+        println!("Agent harnesses supported by `cowbox install-skill`:");
+        for (index, (item, paths, is_detected)) in items.iter().enumerate() {
+            let marker = if *is_detected { "detected" } else { "—" };
+            println!("  {}. [{marker}] {}", index + 1, item.display);
+            for path in paths {
+                println!("       {}", path.display());
+            }
+        }
+    }
+    Ok(0)
+}
+
+fn command_install_rules(args: &InstallRulesArgs) -> CliResult<i32> {
+    let project = args.project.clone().unwrap_or(std::env::current_dir()?);
+    if !project.is_dir() {
+        return Err(CliError::new(
+            "PROJECT_NOT_FOUND",
+            format!("{} is not a directory", project.display()),
+        )
+        .exit(2));
+    }
+    let results = rules::install(&project, args.remove, args.dry_run)?;
+    if args.json {
+        let items = results
+            .iter()
+            .map(|result| {
+                json!({
+                    "path": result.path,
+                    "action": result.action,
+                })
+            })
+            .collect::<Vec<_>>();
+        json::print(&json::ok(
+            "install-rules",
+            None,
+            json!({ "dry_run": args.dry_run, "files": items }),
+        ))?;
+    } else {
+        for result in results {
+            println!("{}: {}", result.path.display(), result.action);
+        }
+    }
+    Ok(0)
+}
+
+fn command_policy(args: &PolicyArgs) -> CliResult<i32> {
+    let project = std::env::current_dir()?;
+    let effective = policy::effective(&project)?;
+    if args.json {
+        json::print(&json::ok("policy", None, serde_json::to_value(&effective)?))?;
+    } else {
+        println!("mode: {:?}", effective.mode);
+        println!("require_confirmation: {}", effective.require_confirmation);
+        println!(
+            "max_files_without_prompt: {}",
+            effective.max_files_without_prompt
+        );
+        println!("triggers: {}", effective.triggers.join(", "));
+        println!("source: {}", effective.source);
+    }
+    Ok(0)
+}
+
+fn command_update(args: &UpdateArgs) -> CliResult<i32> {
+    if !args.check {
+        return Err(CliError::new(
+            "USAGE",
+            "this version supports `cowbox update --check` only",
+        )
+        .exit(2));
+    }
+    setup::update_check(args.json)
+}
+
+fn command_path(args: &PathArgs) -> CliResult<i32> {
+    #[cfg(windows)]
+    {
+        crate::windows_bridge::path(args)
+    }
+    #[cfg(not(windows))]
+    {
+        let mapped = setup::windows_path_to_wsl(&args.path)?;
+        if args.json {
+            json::print(&json::ok(
+                "path",
+                None,
+                json!({ "input": args.path, "wsl": mapped }),
+            ))?;
+        } else {
+            println!("{}", mapped.display());
+        }
+        Ok(0)
+    }
 }
 
 fn command_hidden(args: &HiddenArgs, sandbox_exec: bool) -> CliResult<i32> {

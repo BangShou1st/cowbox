@@ -1,3 +1,4 @@
+use crate::config::AgentMode;
 use clap::{Args, Parser, Subcommand};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -36,6 +37,18 @@ pub enum CliCommand {
     Doctor(DoctorArgs),
     /// Show session telemetry.
     Stats(StatsArgs),
+    /// Install the Windows launcher and the WSL engine (Windows only).
+    Setup(SetupArgs),
+    /// Install the cowbox skill into local agent harnesses.
+    InstallSkill(InstallSkillArgs),
+    /// Add or remove project-level cowbox rules.
+    InstallRules(InstallRulesArgs),
+    /// Print the effective agent trigger policy.
+    Policy(PolicyArgs),
+    /// Check for a newer cowbox release.
+    Update(UpdateArgs),
+    /// Convert a Windows path to its WSL path.
+    Path(PathArgs),
 
     #[command(name = "__sandbox-exec", hide = true)]
     SandboxExec(HiddenArgs),
@@ -47,6 +60,8 @@ pub enum CliCommand {
 pub struct InitArgs {
     #[arg(long)]
     pub force: bool,
+    #[arg(long)]
+    pub agent: bool,
     #[arg(long)]
     pub json: bool,
 }
@@ -149,6 +164,69 @@ pub struct StatsArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct SetupArgs {
+    #[arg(long)]
+    pub distro: Option<String>,
+    #[arg(long)]
+    pub version: Option<String>,
+    #[arg(long)]
+    pub force: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct InstallSkillArgs {
+    #[arg(long)]
+    pub list: bool,
+    #[arg(long)]
+    pub all: bool,
+    #[arg(long = "harness")]
+    pub harness: Vec<String>,
+    #[arg(long, value_enum)]
+    pub mode: Option<AgentMode>,
+    #[arg(long)]
+    pub force: bool,
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct InstallRulesArgs {
+    #[arg(long)]
+    pub project: Option<PathBuf>,
+    #[arg(long)]
+    pub remove: bool,
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct PolicyArgs {
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    #[arg(long)]
+    pub check: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct PathArgs {
+    pub path: PathBuf,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct HiddenArgs {
     #[arg(long)]
     pub spec: PathBuf,
@@ -167,6 +245,12 @@ impl CliCommand {
             CliCommand::Discard(_) => "discard",
             CliCommand::Doctor(_) => "doctor",
             CliCommand::Stats(_) => "stats",
+            CliCommand::Setup(_) => "setup",
+            CliCommand::InstallSkill(_) => "install-skill",
+            CliCommand::InstallRules(_) => "install-rules",
+            CliCommand::Policy(_) => "policy",
+            CliCommand::Update(_) => "update",
+            CliCommand::Path(_) => "path",
             CliCommand::SandboxExec(_) => "__sandbox-exec",
             CliCommand::Supervisor(_) => "__supervisor",
         }
@@ -184,6 +268,12 @@ impl CliCommand {
             CliCommand::Discard(args) => args.json,
             CliCommand::Doctor(args) => args.json,
             CliCommand::Stats(args) => args.json,
+            CliCommand::Setup(args) => args.json,
+            CliCommand::InstallSkill(args) => args.json,
+            CliCommand::InstallRules(args) => args.json,
+            CliCommand::Policy(args) => args.json,
+            CliCommand::Update(args) => args.json,
+            CliCommand::Path(args) => args.json,
             _ => false,
         }
     }

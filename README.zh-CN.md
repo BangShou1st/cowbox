@@ -10,7 +10,7 @@
   </a>
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License" />
   <img src="https://img.shields.io/badge/rust-1.85%2B-orange.svg" alt="Rust" />
-  <img src="https://img.shields.io/badge/platform-Linux%20%2F%20WSL2-lightgrey.svg" alt="Platform" />
+  <img src="https://img.shields.io/badge/platform-Linux%20%2F%20WSL2%20%2F%20Windows-lightgrey.svg" alt="Platform" />
 </p>
 
 **让 Agent 放手改，毫秒级回滚，宿主机保持干净。**
@@ -20,8 +20,9 @@
 </div>
 
 > [!IMPORTANT]
-> cowbox 目前是 **M1 预览版**，只面向 Linux 与 WSL2。MCP 代理、Windows 原生后端、
-> macOS 和网络隔离都不属于 M1。分阶段计划见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+> cowbox 目前是 **M1.5 预览版**。引擎运行在 Linux/WSL2，Windows 提供原生启动器
+> 并委托到 WSL。MCP 代理、Windows 原生文件编辑后端、macOS 和网络隔离属于后续
+> 里程碑。分阶段计划见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
 ## 为什么需要 cowbox
 
@@ -85,6 +86,32 @@ diff、commit 的 Chrome Trace JSON。
   在步骤结束时回收后台子进程。
 
 完整调用链、whiteout 规则与 commit 顺序见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+## Windows 快速开始
+
+下载 Windows release zip，解压 `cowbox.exe`，在终端运行：
+
+```powershell
+.\cowbox.exe setup
+cowbox doctor
+cowbox install-skill --list
+cowbox install-skill --harness codex
+```
+
+`setup` 只安装 Windows 启动器和 WSL 里的 Linux 引擎，**不会自动安装 skill**；
+`install-skill` 是显式 opt-in 步骤。项目可以继续留在 `E:\...`，启动器会自动
+映射到 WSL 的 `/mnt/e/...`。
+
+在项目里：
+
+```powershell
+cd E:\project\your-app
+cowbox init --agent
+cowbox run -- <command>
+```
+
+`init --agent` 会写 `.cowbox.toml`，以及 AGENTS.md、CLAUDE.md、Cursor 规则块。
+默认触发模式是 `ask`，可用 `cowbox policy --json` 查看。
 
 ## WSL2 快速开始
 
@@ -173,8 +200,9 @@ cowbox rollback 0
 | 里程碑 | 范围 | 状态 |
 | --- | --- | --- |
 | **M1** | Linux/WSL2 CLI、快照 DAG、OverlayFS、Landlock、commit journal、测试、基准 | 预览可用 |
+| **M1.5** | Windows 启动器、`setup`、多 harness skill 安装、项目规则与策略 | 预览可用 |
 | **M2** | 网络策略（seccomp 或更新 Landlock）、缓存 bind mount、commit 加固、20 万文件基准 | 计划中 |
-| **M3** | MCP 代理（`cowbox_diff` / `cowbox_rollback` / `cowbox_commit`）、Codex Desktop 的 `cowbox.exe` WSL 桥 | 计划中 |
+| **M3** | MCP 代理（`cowbox_diff` / `cowbox_rollback` / `cowbox_commit`） | 计划中 |
 | **M4** | Windows 原生 ReFS + Job Object 后端、macOS 后端、Eval 套件与公开榜单 | 计划中 |
 
 M1 明确不包含 MCP、Windows 原生、macOS、网络隔离和多 Agent 赛马。边界以

@@ -10,7 +10,7 @@
   </a>
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License" />
   <img src="https://img.shields.io/badge/rust-1.85%2B-orange.svg" alt="Rust" />
-  <img src="https://img.shields.io/badge/platform-Linux%20%2F%20WSL2-lightgrey.svg" alt="Platform" />
+  <img src="https://img.shields.io/badge/platform-Linux%20%2F%20WSL2%20%2F%20Windows-lightgrey.svg" alt="Platform" />
 </p>
 
 **Let agents break things. Rewind in milliseconds. Keep the host clean.**
@@ -20,8 +20,9 @@
 </div>
 
 > [!IMPORTANT]
-> cowbox is an **M1 preview**. It targets Linux and WSL2. MCP proxying, a native
-> Windows backend, macOS support, and network isolation are not part of M1.
+> cowbox is an **M1.5 preview**. The engine targets Linux and WSL2; Windows ships
+> a native launcher that delegates into WSL. MCP proxying, a native Windows
+> file-edit backend, macOS support, and network isolation are later milestones.
 > See [docs/ROADMAP.md](docs/ROADMAP.md) for the staged plan.
 
 ## Why cowbox
@@ -93,6 +94,34 @@ Chrome Trace JSON of namespace, mount, diff, and commit spans.
 
 For the full call sequence, whiteout rules, and commit ordering, see
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Quick start (Windows)
+
+Download the Windows release zip, extract `cowbox.exe`, and run it from a
+terminal:
+
+```powershell
+.\cowbox.exe setup
+cowbox doctor
+cowbox install-skill --list
+cowbox install-skill --harness codex
+```
+
+`setup` installs the Windows launcher and the Linux engine in WSL, but **does
+not install a skill**. `install-skill` is the explicit opt-in step. Your project
+can stay on `E:\...`; the launcher maps it to `/mnt/e/...` inside WSL.
+
+In a project:
+
+```powershell
+cd E:\project\your-app
+cowbox init --agent
+cowbox run -- <command>
+```
+
+`init --agent` writes `.cowbox.toml` plus the AGENTS.md, CLAUDE.md and Cursor
+rule blocks. The default trigger mode is `ask`; inspect it with
+`cowbox policy --json`.
 
 ## Quick start (WSL2)
 
@@ -192,8 +221,9 @@ M1 reports Criterion means and ranges; P99 is not separately instrumented yet.
 | Milestone | Scope | Status |
 | --- | --- | --- |
 | **M1** | Linux/WSL2 CLI, snapshot DAG, OverlayFS, Landlock, commit journal, tests, benchmarks | Preview available |
+| **M1.5** | Windows launcher, `setup`, multi-harness skill installer, project rules and policy | Preview available |
 | **M2** | Network policy (seccomp or newer Landlock), cache bind mounts, commit hardening, 200k-file benchmarks | Planned |
-| **M3** | MCP proxy with `cowbox_diff` / `cowbox_rollback` / `cowbox_commit` meta-tools, `cowbox.exe` WSL bridge for Codex Desktop | Planned |
+| **M3** | MCP proxy with `cowbox_diff` / `cowbox_rollback` / `cowbox_commit` meta-tools | Planned |
 | **M4** | Native Windows ReFS + Job Object backend, macOS backend, eval suite and public leaderboard | Planned |
 
 M1 explicitly excludes MCP, native Windows, macOS, network isolation, and

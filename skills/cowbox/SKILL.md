@@ -1,6 +1,6 @@
 ---
 name: cowbox-sandbox-workflow
-description: Use when making multi-file changes, dependency upgrades, database migrations, or destructive shell commands inside a cowbox-protected workspace. Checkpoints each step, inspects net changes, and rolls back cleanly instead of stacking speculative fixes.
+description: Use when the user explicitly asks for cowbox, or when a task involves multi-file refactors, dependency upgrades, database migrations, destructive shell commands, or untrusted scripts. Checkpoints each command, inspects net changes, and rolls back instead of stacking speculative fixes.
 ---
 
 # Safe cowbox workflow
@@ -8,6 +8,22 @@ description: Use when making multi-file changes, dependency upgrades, database m
 cowbox is a local Copy-on-Write sandbox for a developer workspace. Every
 `cowbox run -- <command>` becomes a numbered step. The host workspace is only
 changed by `cowbox commit`.
+
+## First check
+
+1. Check that `cowbox` (Windows: `cowbox.exe`) exists and run `cowbox --version`.
+2. Run `cowbox policy --json` and follow its `mode`:
+   - `explicit`: use cowbox only when the user explicitly requested it.
+   - `ask`: ask the user before starting a session.
+   - `auto`: start a session without asking.
+3. Run `cowbox doctor` once per project/environment. On Windows this checks the
+   WSL distro and Linux binary; on Linux it checks namespaces, OverlayFS and
+   Landlock.
+
+If the CLI is missing on Windows, tell the user to run `cowbox setup`; the
+installer does not install this skill automatically. The user must explicitly
+run `cowbox install-skill` when they want skill files copied into agent
+harnesses.
 
 ## Rules
 
@@ -29,11 +45,25 @@ changed by `cowbox commit`.
    `extra_rw_paths` bypass the snapshot. Use them only for caches or toolchain
    paths you understand.
 
+## When to use
+
+Use cowbox for:
+
+- `rm -rf`, `git reset --hard`, bulk deletes and destructive scripts;
+- SQLite/Postgres migration scripts and local database resets;
+- dependency installation or major upgrades;
+- refactors touching more than five files;
+- running an untrusted script, MCP tool, or generated migration;
+- tests that create local databases, caches, or background processes.
+
+Do not use cowbox for `ls`, `cat`, `rg`, `git status`, or other read-only
+commands. Do not use it for a single-file edit that does not touch local state.
+
 ## Typical loop
 
 ```bash
 cd /path/to/project
-cowbox init
+cowbox init --agent
 
 cowbox run -- cargo test
 cowbox diff --stat
@@ -49,6 +79,22 @@ cowbox commit --dry-run
 cowbox commit
 ```
 
+On Windows the project can stay at `E:\...`; `cowbox.exe` maps it into WSL. Do
+not ask the user to move the project into WSL. Run `cowbox path <path>` when a
+command needs an explicit WSL path.
+
+## Windows and agent boundary
+
+- `cowbox.exe setup` installs the Windows launcher and the Linux engine in WSL,
+  but **does not install this skill**.
+- `cowbox install-skill --list` shows supported harnesses; `--harness <id>`
+  installs explicitly; `--all` installs into every supported harness.
+- `cowbox init --agent` writes the project rule blocks for AGENTS.md,
+  CLAUDE.md and Cursor.
+- Codex Desktop's built-in file editor is not intercepted in M1.5. Only commands
+  routed through cowbox are protected; the native Windows backend is a later
+  milestone.
+
 ## JSON mode
 
 Use `--json` when another tool needs to parse results:
@@ -60,8 +106,16 @@ cowbox log --json
 cowbox stats --json
 ```
 
-## M1 boundary
+## References
+
+- [Installation and harnesses](references/installation.md)
+- [Windows/WSL behavior](references/windows.md)
+- [Workflow and recovery](references/workflow.md)
+- [Troubleshooting](references/troubleshooting.md)
+
+## Boundary
 
 This skill uses the CLI. The MCP proxy and synthetic `cowbox_diff` /
-`cowbox_rollback` / `cowbox_commit` tools arrive in M3; do not assume they exist
-in an M1 installation.
+`cowbox_rollback` / `cowbox_commit` tools are not part of M1.5; do not assume
+they exist. Codex Desktop built-in edits are outside this boundary until the
+native Windows backend lands.

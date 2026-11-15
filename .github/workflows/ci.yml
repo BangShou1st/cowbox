@@ -130,3 +130,41 @@ jobs:
             echo "benchmark target is not present yet; M1 verifier must add it before release"
             exit 1
           fi
+
+  windows:
+    name: windows build + agent tests
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-windows-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-windows-
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check Windows binary
+        run: cargo check -p cowbox-cli --target x86_64-pc-windows-msvc
+
+      - name: Clippy Windows binary
+        run: cargo clippy -p cowbox-cli --bin cowbox --target x86_64-pc-windows-msvc -- -D warnings
+
+      - name: Agent integration tests
+        run: |
+          cargo test -p cowbox-cli --bin cowbox
+          cargo test -p cowbox-cli --test agent_integration --test cli
+
+      - name: Build release launcher
+        run: cargo build -p cowbox-cli --release
+
+      - name: CLI smoke
+        run: .\target\release\cowbox.exe --help

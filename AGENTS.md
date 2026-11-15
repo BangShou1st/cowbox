@@ -118,3 +118,16 @@ changed, commands run, tests observed, risks remaining.
 
 Document these as roadmap items rather than implementing partial versions that
 look finished.
+
+## 8. Agent integration
+
+- `cowbox setup` installs only the Windows launcher and WSL engine. It must not
+  install a skill or modify agent harness directories.
+- `cowbox install-skill` is the explicit opt-in path. It must write into
+  `skills/cowbox/` under each harness root, never the harness root itself.
+- Default trigger policy is `ask`; `explicit` and `auto` are optional modes.
+  `commit` always requires human approval.
+- Project rules are idempotent marker blocks in `AGENTS.md`, `CLAUDE.md`, and
+  `.cursor/rules/cowbox.mdc`; preserve content outside the markers.
+- M1.5 covers commands routed through cowbox. Codex Desktop's built-in file
+  editor is not protected until the native Windows backend lands.

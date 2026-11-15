@@ -12,8 +12,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  linux-x86_64:
-    name: Linux x86_64 release
+  linux:
+    name: Linux x86_64 build
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
@@ -31,14 +31,65 @@ jobs:
           asset="cowbox-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz"
           tar -C target/release -czf "$asset" cowbox
           sha256sum "$asset" > "$asset.sha256"
-          echo "ASSET=$asset" >> "$GITHUB_ENV"
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: |
+            cowbox-*.tar.gz
+            cowbox-*.tar.gz.sha256
+
+  windows:
+    name: Windows x86_64 build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release launcher
+        run: cargo build --release -p cowbox-cli
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "cowbox-$env:GITHUB_REF_NAME-x86_64-pc-windows-msvc"
+          Compress-Archive -Path target/release/cowbox.exe -DestinationPath "$name.zip"
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: |
+            cowbox-*.zip
+            cowbox-*.zip.sha256
+
+  publish:
+    name: Publish release
+    needs: [linux, windows]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            "$ASSET" \
-            "$ASSET.sha256" \
+          set -euo pipefail
+          prerelease=""
+          case "$GITHUB_REF_NAME" in
+            *-*) prerelease="--prerelease" ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" release-assets/* \
             --generate-notes \
-            --title "cowbox $GITHUB_REF_NAME"
+            --title "cowbox $GITHUB_REF_NAME" \
+            $prerelease

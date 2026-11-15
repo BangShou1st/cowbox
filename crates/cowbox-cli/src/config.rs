@@ -1,5 +1,6 @@
 use crate::error::{CliError, CliResult};
 use crate::workspace::resolve_path;
+use clap::ValueEnum;
 use cowbox_core::policy::DEFAULT_EXCLUDES;
 use cowbox_core::{CommitOptions, DiffOptions, ExecPolicy};
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,43 @@ pub struct Config {
     pub diff: DiffConfig,
     #[serde(default)]
     pub commit: CommitConfig,
+    #[serde(default)]
+    pub agent: Option<AgentConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMode {
+    #[default]
+    Ask,
+    Explicit,
+    Auto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentConfig {
+    pub mode: AgentMode,
+    pub require_confirmation: bool,
+    pub triggers: Vec<String>,
+    pub max_files_without_prompt: usize,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            mode: AgentMode::Ask,
+            require_confirmation: true,
+            triggers: vec![
+                "destructive_shell".to_string(),
+                "database_migration".to_string(),
+                "dependency_upgrade".to_string(),
+                "multi_file_refactor".to_string(),
+                "untrusted_script".to_string(),
+            ],
+            max_files_without_prompt: 5,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +111,7 @@ impl Default for Config {
             sandbox: SandboxConfig::default(),
             diff: DiffConfig::default(),
             commit: CommitConfig::default(),
+            agent: None,
         }
     }
 }
@@ -167,6 +206,12 @@ excluded = [{excluded}]
 
 [commit]
 require_clean_host = true
+
+[agent]
+mode = "ask"
+require_confirmation = true
+triggers = ["destructive_shell", "database_migration", "dependency_upgrade", "multi_file_refactor", "untrusted_script"]
+max_files_without_prompt = 5
 "#,
             excluded = default_excluded()
                 .iter()

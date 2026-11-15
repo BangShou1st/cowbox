@@ -25,6 +25,17 @@ discard and start a new one; layer compaction is an M2 item.
 Explicitly excluded from M1: MCP proxy, native Windows, macOS, network
 isolation, multi-agent racing, and the eval leaderboard.
 
+## M1.5: Windows launcher and agent packaging
+
+Status: in progress in `0.2.0-m1`.
+
+- [x] Native Windows launcher that delegates to WSL via `wsl.exe --cd`.
+- [x] `cowbox setup` CLI installer with release checksum verification.
+- [x] `install-skill` for 14 agent harnesses; manual opt-in only.
+- [x] `install-rules` and `init --agent` project policy blocks.
+- [x] `policy --json` with ask/explicit/auto modes.
+- [ ] MCP server (`cowbox mcp`) for MCP-native agents.
+
 ## M2: stronger containment and scale
 
 - Network policy via seccomp user notification or Landlock ABI 4+ where the
@@ -44,8 +55,6 @@ isolation, multi-agent racing, and the eval leaderboard.
   forwarding.
 - Synthetic MCP tools: `cowbox_diff`, `cowbox_rollback`, `cowbox_commit`.
 - Auto-checkpoint on mutating `tools/call` requests.
-- `cowbox.exe` WSL bridge for Codex Desktop: path mapping, raw pipes, UTF-16LE
-  stderr cleanup, `WSL_INTEROP` removal, and Ctrl+C process-tree cleanup.
 - A `skills/cowbox/SKILL.md` workflow that prefers rollback over stacking
   speculative fixes.
 

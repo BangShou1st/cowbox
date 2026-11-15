@@ -1,5 +1,8 @@
 use crate::state::SessionRecord;
-use cowbox_core::{Capabilities, ChangeKind, EntryKind, FileChange};
+#[cfg(not(windows))]
+use cowbox_core::Capabilities;
+use cowbox_core::{ChangeKind, EntryKind, FileChange};
+#[cfg(not(windows))]
 use std::path::Path;
 
 #[derive(Debug, Default)]
@@ -191,6 +194,7 @@ pub fn print_stats(stats: &Stats) {
     );
 }
 
+#[cfg(not(windows))]
 pub fn print_doctor(capabilities: &Capabilities, state_root: &Path, ready: bool) {
     println!("cowbox doctor ({})", env!("CARGO_PKG_VERSION"));
     println!("State root: {}", state_root.display());
@@ -269,6 +273,7 @@ pub fn print_doctor(capabilities: &Capabilities, state_root: &Path, ready: bool)
     );
 }
 
+#[cfg(not(windows))]
 fn line(label: &str, ok: bool, detail: &str) {
     println!("[{}] {label}: {detail}", if ok { "ok" } else { "!!" });
 }

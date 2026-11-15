@@ -1,13 +1,17 @@
 #![forbid(unsafe_code)]
 
+mod agent;
 mod cli;
 mod commands;
 mod config;
 mod error;
 mod json;
 mod render;
+mod setup;
 mod state;
 mod trace;
+#[cfg(windows)]
+mod windows_bridge;
 mod workspace;
 
 use clap::Parser;
