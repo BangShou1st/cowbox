@@ -348,20 +348,22 @@ See [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md) for the full threat model.
 We only publish numbers that were measured on a real machine. The harness and
 methodology live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-The final M2 regression round compared the published `v0.4.0-m2` binary with
-the long-session/cache candidate on WSL2 ext4. Each scenario used 20 samples,
-one excluded warm-up, and a fresh session for every sample.
+The final M2 offline-execution round compared the merge baseline `29af7e7` with
+the network-policy/offline candidate `fb4dad0` on WSL2 ext4. Each scenario used
+20 samples, one excluded warm-up, and a fresh session for every sample.
 
 | Scenario | 10,000 files | 200,000 files |
 | --- | ---: | ---: |
-| First `cowbox run -- true` (includes manifest capture) | 34.95 / 39.40 ms | 130.59 / 143.40 ms |
-| Subsequent run with 1 parent layer | 29.68 / 35.55 ms | 28.65 / 31.33 ms |
-| `cowbox diff` with 10 changed files | 5.88 / 10.78 ms | 89.25 / 93.31 ms |
+| First `cowbox run -- true` (includes manifest capture) | 29.92 / 31.19 ms | 124.45 / 129.62 ms |
+| Subsequent run with 1 parent layer | 23.17 / 25.90 ms | 23.86 / 25.65 ms |
+| `cowbox diff` with 10 changed files | 5.63 / 5.80 ms | 89.98 / 94.12 ms |
 
 Cells are median / P95 of complete CLI wall-clock durations. The 10,000-file
 and 200,000-file first-run limits of 60/80 ms and 150/200 ms pass, as do the
 10-file diff medians of 20 ms and 200 ms. A real 300-step session completed
-with automatic compaction at steps 151 and 268.
+with 279 `host` and 21 `off` steps, automatic compaction at 151 and 268,
+rollback, branch, commit, and interruption recovery. Network namespace setup
+added 0.47 ms to the 10k first-run median and 0.38 ms to the one-parent median.
 
 See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for full statistics, fixtures,
 machine details, caveats, and the exact rerun command. P99 is not separately

@@ -444,4 +444,49 @@ mod tests {
         capabilities.state_fs = Some("ext4".to_string());
         assert!(capabilities_ready(&capabilities));
     }
+
+    #[cfg(not(windows))]
+    fn stages() -> DiagnosticStages {
+        DiagnosticStages {
+            state_disk: true,
+            user_namespace: None,
+            network_namespace: None,
+            overlayfs: None,
+            landlock: None,
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn active_doctor_classifies_each_setup_stage() {
+        let mut user = stages();
+        classify_failure("USER_NAMESPACE_FAILED", NetworkMode::Off, &mut user);
+        assert_eq!(user.user_namespace, Some(false));
+
+        let mut overlay = stages();
+        classify_failure("OVERLAYFS_FAILED", NetworkMode::Off, &mut overlay);
+        assert_eq!(overlay.user_namespace, Some(true));
+        assert_eq!(overlay.overlayfs, Some(false));
+
+        let mut network = stages();
+        classify_failure("NETWORK_NAMESPACE_FAILED", NetworkMode::Off, &mut network);
+        assert_eq!(network.user_namespace, Some(true));
+        assert_eq!(network.overlayfs, Some(true));
+        assert_eq!(network.network_namespace, Some(false));
+
+        let mut landlock = stages();
+        classify_failure("LANDLOCK_FAILED", NetworkMode::Off, &mut landlock);
+        assert_eq!(landlock.network_namespace, Some(true));
+        assert_eq!(landlock.landlock, Some(false));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn active_doctor_does_not_spawn_a_command_on_state_disk_failure() {
+        let report = check_run(Path::new("/nonexistent/cowbox"), NetworkMode::Off, false)
+            .expect("state disk diagnostic");
+        assert!(!report.attempted);
+        assert!(!report.command_started);
+        assert_eq!(report.error.expect("error").code, "STATE_DISK_NOT_READY");
+    }
 }
