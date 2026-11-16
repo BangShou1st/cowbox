@@ -8,6 +8,8 @@ use cowbox_core::Capabilities;
 #[cfg(not(windows))]
 use cowbox_core::HostCacheKind;
 use cowbox_core::NetworkMode;
+#[cfg(not(windows))]
+use rustix::fs::{Access, access};
 use serde::{Deserialize, Serialize};
 #[cfg(not(windows))]
 use std::fs;
@@ -53,12 +55,23 @@ pub struct DiagnosticFailure {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StateDiskReport {
+    pub path: PathBuf,
+    pub existing_prefix: PathBuf,
+    pub filesystem: Option<String>,
+    pub writable: bool,
+    pub ready: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunCheckReport {
     pub attempted: bool,
     pub ready: bool,
     pub network: NetworkMode,
     pub command_started: bool,
     pub exit_code: Option<i32>,
+    pub state_disk: StateDiskReport,
     pub stages: DiagnosticStages,
     pub error: Option<DiagnosticFailure>,
 }
@@ -142,37 +155,106 @@ pub fn state_fs_ready(capabilities: &Capabilities) -> bool {
 }
 
 #[cfg(not(windows))]
+pub fn state_disk_report(state_root: &Path, filesystem: Option<&str>) -> StateDiskReport {
+    let path = state_root.to_path_buf();
+    let Some(existing_prefix) = nearest_existing_prefix(&path) else {
+        return StateDiskReport {
+            path,
+            existing_prefix: PathBuf::new(),
+            filesystem: filesystem.map(ToString::to_string),
+            writable: false,
+            ready: false,
+            detail: format!(
+                "state path {} has no existing parent to inspect",
+                state_root.display()
+            ),
+        };
+    };
+    let filesystem = filesystem.map(ToString::to_string);
+    let access_result = access(&existing_prefix, Access::WRITE_OK | Access::EXEC_OK);
+    let writable = access_result.is_ok();
+    let filesystem_ready = filesystem.as_deref().is_some_and(|value| value != "9p");
+    let ready = writable && filesystem_ready;
+    let detail = if filesystem.is_none() {
+        format!(
+            "cannot determine the filesystem for state path {}; nearest existing path is {}",
+            state_root.display(),
+            existing_prefix.display()
+        )
+    } else if filesystem.as_deref() == Some("9p") {
+        format!(
+            "state path {} is on 9p; COWBOX_HOME requires an xattr-capable Linux filesystem",
+            state_root.display()
+        )
+    } else if let Err(error) = access_result {
+        format!(
+            "state path {} is not ready on {}: nearest existing path {} is not writable and searchable ({error})",
+            state_root.display(),
+            filesystem.as_deref().unwrap_or("an unknown filesystem"),
+            existing_prefix.display()
+        )
+    } else {
+        format!(
+            "state path {} is writable through {} on {}",
+            state_root.display(),
+            existing_prefix.display(),
+            filesystem.as_deref().unwrap_or("an unknown filesystem")
+        )
+    };
+    StateDiskReport {
+        path,
+        existing_prefix,
+        filesystem,
+        writable,
+        ready,
+        detail,
+    }
+}
+
+#[cfg(not(windows))]
+fn nearest_existing_prefix(path: &Path) -> Option<PathBuf> {
+    if path.exists() {
+        return Some(path.to_path_buf());
+    }
+    path.ancestors()
+        .skip(1)
+        .find(|candidate| candidate.exists())
+        .map(Path::to_path_buf)
+}
+
+#[cfg(not(windows))]
 pub fn check_run(
     executable: &Path,
     network: NetworkMode,
-    state_disk_ready: bool,
+    state_disk: StateDiskReport,
 ) -> CliResult<RunCheckReport> {
     let mut stages = DiagnosticStages {
-        state_disk: state_disk_ready,
+        state_disk: state_disk.ready,
         user_namespace: None,
         network_namespace: None,
         overlayfs: None,
         landlock: None,
     };
-    if !state_disk_ready {
+    if !state_disk.ready {
+        let message = state_disk.detail.clone();
         return Ok(RunCheckReport {
             attempted: false,
             ready: false,
             network,
             command_started: false,
             exit_code: None,
+            state_disk,
             stages,
             error: Some(DiagnosticFailure {
                 code: "STATE_DISK_NOT_READY".to_string(),
-                message: "the state filesystem is not ready for xattr-capable COW state"
-                    .to_string(),
+                message,
                 exit_code: Some(1),
             }),
         });
     }
 
     let root = diagnostic_root()?;
-    let result = run_check_in_fixture(executable, &root, network, &mut stages);
+    let result = run_check_in_fixture(executable, &root, network, state_disk.clone(), &mut stages);
     let cleanup_result = remove_diagnostic_tree(&root);
     let mut report = result?;
     cleanup_result?;
@@ -185,6 +267,7 @@ fn run_check_in_fixture(
     executable: &Path,
     root: &Path,
     network: NetworkMode,
+    state_disk: StateDiskReport,
     stages: &mut DiagnosticStages,
 ) -> CliResult<RunCheckReport> {
     let workspace = root.join("workspace");
@@ -233,6 +316,7 @@ fn run_check_in_fixture(
                     "real sandbox check returned invalid JSON: {error}; stderr={}",
                     String::from_utf8_lossy(&output.stderr).trim()
                 ),
+                state_disk.clone(),
                 stages,
             ));
         }
@@ -249,6 +333,7 @@ fn run_check_in_fixture(
             network,
             command_started,
             exit_code,
+            state_disk,
             stages: stages.clone(),
             error: if sandbox_ready {
                 None
@@ -281,6 +366,7 @@ fn run_check_in_fixture(
         network,
         command_started,
         exit_code,
+        state_disk,
         stages: stages.clone(),
         error: Some(DiagnosticFailure {
             code,
@@ -322,6 +408,7 @@ fn failed_run_check(
     exit_code: Option<i32>,
     code: &str,
     message: String,
+    state_disk: StateDiskReport,
     stages: &DiagnosticStages,
 ) -> RunCheckReport {
     RunCheckReport {
@@ -330,6 +417,7 @@ fn failed_run_check(
         network,
         command_started,
         exit_code,
+        state_disk,
         stages: stages.clone(),
         error: Some(DiagnosticFailure {
             code: code.to_string(),
@@ -457,6 +545,22 @@ mod tests {
     }
 
     #[cfg(not(windows))]
+    fn state_disk(ready: bool) -> StateDiskReport {
+        StateDiskReport {
+            path: PathBuf::from("/tmp/cowbox-state"),
+            existing_prefix: PathBuf::from("/tmp"),
+            filesystem: Some("ext4".to_string()),
+            writable: ready,
+            ready,
+            detail: if ready {
+                "state path is writable".to_string()
+            } else {
+                "state path is not writable".to_string()
+            },
+        }
+    }
+
+    #[cfg(not(windows))]
     #[test]
     fn active_doctor_classifies_each_setup_stage() {
         let mut user = stages();
@@ -483,10 +587,51 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn active_doctor_does_not_spawn_a_command_on_state_disk_failure() {
-        let report = check_run(Path::new("/nonexistent/cowbox"), NetworkMode::Off, false)
-            .expect("state disk diagnostic");
+        let report = check_run(
+            Path::new("/nonexistent/cowbox"),
+            NetworkMode::Off,
+            state_disk(false),
+        )
+        .expect("state disk diagnostic");
         assert!(!report.attempted);
         assert!(!report.command_started);
         assert_eq!(report.error.expect("error").code, "STATE_DISK_NOT_READY");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn state_disk_rejects_an_unwritable_ext4_parent_without_creating_state() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if rustix::process::geteuid().as_raw() == 0 {
+            return;
+        }
+        let parent = match tempfile::Builder::new()
+            .prefix("cowbox-state-disk-")
+            .tempdir_in("/tmp")
+        {
+            Ok(parent) => parent,
+            Err(_) => return,
+        };
+        let stat = match rustix::fs::statfs(parent.path()) {
+            Ok(stat) => stat,
+            Err(_) => return,
+        };
+        if stat.f_type as u64 != 0xEF53 {
+            return;
+        }
+
+        let state = parent.path().join("state");
+        fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o500))
+            .expect("make state parent read-only");
+        let report = state_disk_report(&state, Some("ext4"));
+        fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700))
+            .expect("restore state parent mode");
+
+        assert!(!report.ready);
+        assert!(!report.writable);
+        assert_eq!(report.existing_prefix, parent.path());
+        assert!(report.detail.contains("not writable and searchable"));
+        assert!(!state.exists());
     }
 }

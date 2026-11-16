@@ -860,10 +860,12 @@ fn command_doctor(args: &DoctorArgs) -> CliResult<i32> {
         let static_ready = doctor::capabilities_ready(&capabilities);
         let network = config.network_policy(args.network.map(Into::into)).mode;
         let run_check = if args.check_run {
+            let state_disk =
+                doctor::state_disk_report(&context.state_root, capabilities.state_fs.as_deref());
             Some(doctor::check_run(
                 &std::env::current_exe()?,
                 network,
-                doctor::state_fs_ready(&capabilities),
+                state_disk,
             )?)
         } else {
             None

@@ -442,9 +442,14 @@ whiteout kind is confirmed by the first real run, and latency is measured by
 `doctor --check-run [--network off]` additionally creates a temporary ext4
 fixture and executes the real CLI, helper, mapping, overlay, network namespace,
 Landlock, and user-command path. `run_check.stages` distinguishes state-disk,
-user-namespace, network-namespace, OverlayFS, and Landlock failures, and
+user-namespace, network-namespace, OverlayFS, and Landlock failures.
+Before creating the fixture, it checks that the configured state path
+or its nearest existing parent is writable and searchable and that the
+detected state filesystem is usable. `run_check.state_disk` reports the
+configured path, inspected prefix, filesystem, access result, and detail.
 `command_started` proves whether a setup failure prevented user code from
-running. The ordinary static doctor JSON fields remain unchanged.
+running. The ordinary static doctor JSON fields remain unchanged; plain
+`doctor` still performs no write-access probe and creates no state directory.
 
 `stats` reports logical step count, physical mount layers, compacted storage,
 rollback count, reaped orphans, incremental disk use, the current policy
