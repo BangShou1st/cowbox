@@ -760,6 +760,114 @@ Raw artifacts are in
 | `paired-20261116T0313Z.json` | `85b7e88c021d476a0d0dcaaedd21ce5630575d63f626978c5cf6db8ccc25f262` |
 | `criterion.log` | `cac68eb8cacd5a4b771895ad37dbb4e2aeaf2d1bb58d124c7915c48098ee37ed` |
 
+## M2 review-hardening round
+
+The fifth review round used the same published Linux binary
+`2a8b38b3f7aab1100fd6f1ada8a0ebd4c62236522c918ce868cf8f8d2b7caa29`
+and candidate commit `06b82d4c21579deb52a204c11c519e8aa21ee199`. The rebuilt
+candidate binary SHA-256 was
+`3b1df3bea053a9b4fd3ac04f733fe34e2abcec4990388f232cd7aef677ed0e98`.
+
+This round fixed directory-to-file replacement, read-only xattr copying,
+read-only temporary-tree recovery, quadratic compaction scans, and the
+benchmark's acceptance of a candidate exiting after the legacy layer limit.
+
+The baseline run started at load average `0.140, 0.337, 0.205` and ended at
+`1.297, 0.627, 0.309`; the candidate run started at
+`1.297, 0.627, 0.309` and ended at `1.347, 0.724, 0.356`. The paired run
+started at `1.048, 0.688, 0.351` and ended at `1.678, 0.837, 0.405`.
+
+### Full harness
+
+Cells are median / P95 milliseconds. The baseline run used
+`--allow-legacy-layer-limit`; the candidate run did not.
+
+| Scenario | Files | `v0.4.0-m2` baseline | Candidate |
+| --- | ---: | ---: | ---: |
+| First run | 10,000 | 32.29 / 35.97 | **34.95 / 39.40** |
+| One parent layer | 10,000 | 24.41 / 29.50 | **29.68 / 35.55** |
+| 10-file diff | 10,000 | 9.38 / 13.71 | **5.88 / 10.78** |
+| First run | 200,000 | 122.48 / 275.97 | **130.59 / 143.40** |
+| One parent layer | 200,000 | 27.32 / 35.53 | **28.65 / 31.33** |
+| 10-file diff | 200,000 | 87.93 / 99.65 | **89.25 / 93.31** |
+
+The candidate first-run targets pass at 34.95 / 39.40 ms and
+130.59 / 143.40 ms. The diff medians pass at 5.88 ms and 89.25 ms. The
+baseline's 200,000-file P95 contained a large host-noise outlier and is retained
+unchanged rather than trimmed.
+
+### Paired first-run A/B
+
+| Files | Baseline median / P95 | Candidate median / P95 | Paired delta |
+| ---: | ---: | ---: | ---: |
+| 10,000 | 32.64 / 35.74 ms | **32.38 / 46.91 ms** | +0.32 / +7.36 ms |
+| 200,000 | 167.64 / 180.87 ms | **165.74 / 178.36 ms** | +0.40 / +12.88 ms |
+
+The paired run shared a higher system load than the full harness. The paired
+deltas remain small, while the full-harness absolute targets are the release
+gate.
+
+### Long session and scale
+
+The candidate completed all 300 steps without being allowed to stop at the
+legacy limit:
+
+| Session segment | Median | P95 |
+| --- | ---: | ---: |
+| Candidate all 300 steps | 36.97 ms | 47.88 ms |
+| Candidate steps 1-151 | 34.66 ms | 49.51 ms |
+| Candidate steps 152-300 | 38.60 ms | 47.17 ms |
+
+| Compaction | Step elapsed | Physical layers after | Stored compact layers | Reported compact bytes |
+| ---: | ---: | ---: | ---: | ---: |
+| 151 | 42.67 ms | 35 | 1 | 4,096 |
+| 268 | 46.05 ms | 35 | 2 | 8,192 |
+
+The baseline with the explicit legacy flag completed step 151 and rejected step
+152 with `CONFIG_ERROR` after 1.45 ms. Without the flag, the harness treats that
+stop as a failure.
+
+A separate real-change run completed 300 steps with directory replacement,
+read-only file/directory xattrs, deletion, opaque recreation, symlink update,
+type changes, and hardlinks. It produced 18 diff entries and two compactions;
+the diff was identical before and after compaction, rollback before the
+compacted prefix and branching preserved the same changes, and host drift was
+refused. The post-compaction sandbox view also passed explicit content, mode,
+xattr, and hardlink checks.
+
+For the many-entry scaling check, a 10,000-file upper layer was prepared through
+150 steps and the state was copied before compaction. The pre-fix candidate
+step took 17,544.558 ms; the fixed candidate took 428.554 ms. This is a single
+diagnostic run, not a percentile study, but it confirms that whole-map scans
+were removed from the hot path.
+
+### Criterion
+
+The first Criterion pass ran under visible host load. A lower-load rerun
+recorded:
+
+| Benchmark | Measured |
+| --- | --- |
+| `diff_scan/10000_files_10_changes` | 4.0189 / **4.1259** / 4.2941 ms |
+| `rollback_dag/100_steps` | 11.710 / **12.005** / 12.383 ns |
+| `run_true/10000_files_end_to_end` | 35.949 / **39.453** / 43.916 ms |
+
+`run_true` reported no statistically significant change (`p=0.18`) with a wide
+interval. Diff and DAG code paths were not modified in this round; the
+20-sample CLI harness and the compaction scaling check remain the primary
+evidence.
+
+Raw artifacts are in
+`/home/bangshou/cowbox-bench-results/m2-review-20261116T035232Z/`.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `baseline.json` | `2e89fa3973d5c7742903ba7f6c8ebb9a0c017ba93e3428edf2b40daa45fd8543` |
+| `candidate.json` | `a60cd033355d3a21ff786624cf9ea42f7013ebe496a4f56b9bfd3f0225ba9eb0` |
+| `paired-20261116T0355Z.json` | `9646010dad6be873f272cf6083139a5dea6997f9aa17769c49207cca710bbaec` |
+| `criterion.log` | `da601be23389573068631dfdd2731dfea4a20f673f5f437f5fff747f79cd9880` |
+| `criterion-rerun.log` | `d73997c35fb2b652c92ffe1b97f239f5d135fabbb25b0519b50f26eb71281553` |
+
 ## How to run
 
 ```bash
@@ -784,6 +892,10 @@ binary to the harness. The harness requires an ext4 benchmark root and fails if
 `doctor --json` is not ready. A missing CLI, failed sandbox preflight, invalid
 output, or unexpected step count fails the run instead of producing a partial
 result.
+
+Baseline binaries that predate layer compaction must be run with
+`--allow-legacy-layer-limit`. Candidate runs must omit that flag so an
+unexpected exit after step 151 fails the benchmark.
 
 Use `--root /tmp/cowbox-m2-run --keep` to retain fixtures and states for
 inspection. Keep output files outside the disposable benchmark root.

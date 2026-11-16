@@ -283,9 +283,9 @@ one excluded warm-up, and a fresh session for every sample.
 
 | Scenario | 10,000 files | 200,000 files |
 | --- | ---: | ---: |
-| First `cowbox run -- true` (includes manifest capture) | 40.40 / 46.98 ms | 119.05 / 130.97 ms |
-| Subsequent run with 1 parent layer | 30.81 / 35.28 ms | 28.60 / 31.53 ms |
-| `cowbox diff` with 10 changed files | 14.17 / 17.00 ms | 91.69 / 103.25 ms |
+| First `cowbox run -- true` (includes manifest capture) | 34.95 / 39.40 ms | 130.59 / 143.40 ms |
+| Subsequent run with 1 parent layer | 29.68 / 35.55 ms | 28.65 / 31.33 ms |
+| `cowbox diff` with 10 changed files | 5.88 / 10.78 ms | 89.25 / 93.31 ms |
 
 Cells are median / P95 of complete CLI wall-clock durations. The 10,000-file
 and 200,000-file first-run limits of 60/80 ms and 150/200 ms pass, as do the
