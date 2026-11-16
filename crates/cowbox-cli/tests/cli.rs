@@ -249,6 +249,11 @@ fn doctor_rejects_a_dedicated_9p_state_path_without_creating_it() {
         value["data"]["capabilities"]["state_fs"].as_str(),
         Some("9p")
     );
+    assert_eq!(
+        value["data"]["state_root"].as_str(),
+        state.to_str(),
+        "doctor JSON should report the inspected state root"
+    );
     assert!(notes.contains("COWBOX_HOME"));
     assert!(notes.contains("xattr-capable"));
     assert!(notes.contains("ext4"));

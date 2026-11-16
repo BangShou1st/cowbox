@@ -1,7 +1,9 @@
 use crate::error::{CliError, CliResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::{Component, Path, PathBuf};
+#[cfg(any(not(windows), test))]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -60,6 +62,7 @@ pub fn validate_state_root(state_root: &Path, workspace: &Path) -> CliResult<()>
     ensure_state_root_outside(&state_root, &workspace)
 }
 
+#[cfg(any(not(windows), test))]
 pub(crate) fn diagnostic_state_root(
     state_root_setting: &Path,
     workspace: &Path,
@@ -104,6 +107,7 @@ fn ensure_state_root_outside(state_root: &Path, workspace: &Path) -> CliResult<(
     Ok(())
 }
 
+#[cfg(any(not(windows), test))]
 fn state_root_error(message: impl Into<String>) -> CliError {
     CliError::new("STATE_ROOT", message)
         .hint(
@@ -112,11 +116,13 @@ fn state_root_error(message: impl Into<String>) -> CliError {
         .exit(2)
 }
 
+#[cfg(any(not(windows), test))]
 fn resolve_existing_prefix(path: &Path) -> CliResult<PathBuf> {
     let cwd = std::env::current_dir()?;
     resolve_existing_prefix_from(&cwd, path)
 }
 
+#[cfg(any(not(windows), test))]
 fn resolve_existing_prefix_from(base: &Path, path: &Path) -> CliResult<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()

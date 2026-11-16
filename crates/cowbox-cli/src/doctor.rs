@@ -1,16 +1,22 @@
+#[cfg(not(windows))]
 use crate::config::Config;
+#[cfg(not(windows))]
 use crate::error::CliResult;
+#[cfg(not(windows))]
 use crate::workspace;
 use cowbox_core::Capabilities;
+#[cfg(not(windows))]
 use std::path::PathBuf;
 
 pub const REQUIRED_LANDLOCK_ABI: i32 = 3;
 
+#[cfg(not(windows))]
 #[derive(Debug)]
 pub struct DiagnosticContext {
     pub state_root: PathBuf,
 }
 
+#[cfg(not(windows))]
 pub fn diagnostic_context() -> CliResult<DiagnosticContext> {
     let cwd = std::env::current_dir()?;
     let workspace = workspace::find_workspace_root(&cwd)?;
@@ -20,6 +26,7 @@ pub fn diagnostic_context() -> CliResult<DiagnosticContext> {
     Ok(DiagnosticContext { state_root })
 }
 
+#[cfg(any(not(windows), test))]
 pub fn capabilities_ready(capabilities: &Capabilities) -> bool {
     capabilities.user_namespace
         && capabilities.overlayfs

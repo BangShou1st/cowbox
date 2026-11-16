@@ -834,7 +834,11 @@ fn command_doctor(args: &DoctorArgs) -> CliResult<i32> {
             json::print(&json::ok(
                 "doctor",
                 None,
-                json!({ "ready": ready, "capabilities": capabilities }),
+                json!({
+                    "ready": ready,
+                    "capabilities": capabilities,
+                    "state_root": context.state_root,
+                }),
             ))?;
         } else {
             render::print_doctor(&capabilities, &context.state_root, ready);
