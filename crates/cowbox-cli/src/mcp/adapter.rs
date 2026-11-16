@@ -7,7 +7,7 @@ use crate::error::CliResult;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -539,7 +539,17 @@ fn map_workspace_path(workspace: &Path, merged_root: &Path, value: &str) -> Stri
     let Ok(relative) = path.strip_prefix(workspace) else {
         return value.to_string();
     };
-    merged_root.join(relative).to_string_lossy().into_owned()
+    let mut safe = PathBuf::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => safe.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return value.to_string();
+            }
+        }
+    }
+    merged_root.join(safe).to_string_lossy().into_owned()
 }
 
 fn adapter_failure(code: &str, message: impl Into<String>, exit_code: i32) -> Box<AdapterFailure> {
@@ -600,6 +610,14 @@ mod tests {
         assert_eq!(
             map_workspace_path(Path::new("/project"), Path::new("/state/merged"), "python3"),
             "python3"
+        );
+        assert_eq!(
+            map_workspace_path(
+                Path::new("/project"),
+                Path::new("/state/merged"),
+                "/project/../outside"
+            ),
+            "/project/../outside"
         );
     }
 }

@@ -105,6 +105,13 @@ impl Proxy {
             None => std::env::current_dir()?,
         };
         let workspace = workspace::find_workspace_root(&start)?;
+        if !workspace.is_dir() {
+            return Err(CliError::new(
+                "MCP_WORKSPACE_INVALID",
+                format!("workspace {} is not a directory", workspace.display()),
+            )
+            .exit(2));
+        }
         let config = Config::load(&workspace)?;
         let network = config.network_policy(args.network.map(Into::into));
         let call_timeout = config::parse_timeout(&args.timeout)?;
