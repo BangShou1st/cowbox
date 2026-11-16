@@ -64,6 +64,12 @@ line-delimited JSON-RPC stream.
 code are preserved. The Windows launcher does not reinterpret the active-run
 JSON or its stage-specific failure codes.
 
+When `doctor --json` cannot start the configured WSL distro, the Windows
+launcher emits the structured error `WSL_START_FAILED` with exit code 1 and
+the WSL diagnostic text. Once the Linux engine returns a valid cowbox doctor
+JSON envelope, the launcher forwards it without repackaging, including a
+`ready=false` result and its original nonzero exit code.
+
 `cowbox demo --offline` runs the real demo command, diff, and rollback with
 network policy `off`. A host/IP connection is unavailable inside that step;
 filesystem-backed Unix sockets remain an IPC boundary.

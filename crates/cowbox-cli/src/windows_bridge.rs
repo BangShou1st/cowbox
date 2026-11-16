@@ -106,7 +106,17 @@ fn resolve_linux_binary(distro: &str, wsl: &WslConfig) -> CliResult<String> {
     };
     let output = Command::new("wsl.exe")
         .args(["-d", distro, "--exec", "bash", "-lc", query])
-        .output()?;
+        .output()
+        .map_err(|error| {
+            CliError::new(
+                "WSL_START_FAILED",
+                format!("cannot start WSL distro {distro}: {error}"),
+            )
+            .hint("verify that WSL is installed and the configured distro exists")
+        })?;
+    if !output.status.success() {
+        return Err(wsl_start_error(distro, &output.stderr, &output.stdout));
+    }
     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if path.starts_with('/') {
         Ok(path)
@@ -125,7 +135,8 @@ pub fn doctor(_args: &DoctorArgs) -> CliResult<i32> {
     let linux_binary = resolve_linux_binary(&distro, &config.wsl)?;
     let cwd = std::env::current_dir()?;
     let args = std::env::args_os().skip(1).collect::<Vec<OsString>>();
-    let status = Command::new("wsl.exe")
+    let mut command = Command::new("wsl.exe");
+    command
         .args([
             "-d",
             &distro,
@@ -137,12 +148,79 @@ pub fn doctor(_args: &DoctorArgs) -> CliResult<i32> {
             "exec \"$0\" \"$@\"",
             &linux_binary,
         ])
-        .args(args)
-        .status()
-        .map_err(|error| {
-            CliError::new("WSL_NOT_FOUND", format!("cannot run WSL doctor: {error}"))
+        .args(args);
+    if _args.json {
+        let output = command.output().map_err(|error| {
+            CliError::new(
+                "WSL_START_FAILED",
+                format!("cannot run WSL doctor: {error}"),
+            )
+            .hint("verify that WSL is installed and the configured distro exists")
         })?;
+        return finish_doctor_json(&distro, output);
+    }
+    let status = command.status().map_err(|error| {
+        CliError::new(
+            "WSL_START_FAILED",
+            format!("cannot run WSL doctor: {error}"),
+        )
+        .hint("verify that WSL is installed and the configured distro exists")
+    })?;
     Ok(status.code().unwrap_or(1))
+}
+
+fn finish_doctor_json(distro: &str, output: std::process::Output) -> CliResult<i32> {
+    let stdout = decode_wsl_bytes(&output.stdout);
+    let stderr = decode_wsl_bytes(&output.stderr);
+    if is_doctor_envelope(&stdout) {
+        std::io::stdout().write_all(&stdout)?;
+        std::io::stderr().write_all(&stderr)?;
+        return Ok(output.status.code().unwrap_or(1));
+    }
+    let detail = format!(
+        "stdout={}; stderr={}",
+        String::from_utf8_lossy(&stdout).trim(),
+        String::from_utf8_lossy(&stderr).trim()
+    );
+    Err(if output.status.success() {
+        CliError::new(
+            "DOCTOR_INVALID",
+            format!("WSL distro {distro} returned no valid cowbox doctor JSON: {detail}"),
+        )
+    } else {
+        wsl_start_error(distro, &output.stderr, &output.stdout)
+    })
+}
+
+fn is_doctor_envelope(bytes: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    if value["schema_version"].as_u64() != Some(1) || value["command"].as_str() != Some("doctor") {
+        return false;
+    }
+    match value["ok"].as_bool() {
+        Some(true) => value["data"].is_object(),
+        Some(false) => value["error"].is_object(),
+        None => false,
+    }
+}
+
+fn wsl_start_error(distro: &str, stderr: &[u8], stdout: &[u8]) -> CliError {
+    let stderr = decode_wsl_text(stderr);
+    let stdout = decode_wsl_text(stdout);
+    let detail = if !stderr.trim().is_empty() {
+        stderr.trim().to_string()
+    } else if !stdout.trim().is_empty() {
+        stdout.trim().to_string()
+    } else {
+        "wsl.exe returned an error without diagnostic output".to_string()
+    };
+    CliError::new(
+        "WSL_START_FAILED",
+        format!("WSL distro {distro} did not start: {detail}"),
+    )
+    .hint("verify that WSL is installed and the configured distro exists")
 }
 
 pub fn path(args: &PathArgs) -> CliResult<i32> {
@@ -159,13 +237,13 @@ pub fn path(args: &PathArgs) -> CliResult<i32> {
     Ok(0)
 }
 
-fn decode_wsl_text(bytes: &[u8]) -> String {
+fn decode_wsl_bytes(bytes: &[u8]) -> Vec<u8> {
     if bytes.starts_with(&[0xFF, 0xFE]) {
         let mut units = Vec::new();
         for chunk in bytes[2..].chunks_exact(2) {
             units.push(u16::from_le_bytes([chunk[0], chunk[1]]));
         }
-        return String::from_utf16_lossy(&units);
+        return String::from_utf16_lossy(&units).into_bytes();
     }
     let null_ratio =
         bytes.iter().filter(|byte| **byte == 0).count() as f32 / bytes.len().max(1) as f32;
@@ -174,9 +252,13 @@ fn decode_wsl_text(bytes: &[u8]) -> String {
         for chunk in bytes.chunks_exact(2) {
             units.push(u16::from_le_bytes([chunk[0], chunk[1]]));
         }
-        return String::from_utf16_lossy(&units);
+        return String::from_utf16_lossy(&units).into_bytes();
     }
-    String::from_utf8_lossy(bytes).into_owned()
+    bytes.to_vec()
+}
+
+fn decode_wsl_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(&decode_wsl_bytes(bytes)).into_owned()
 }
 
 #[cfg(test)]
@@ -191,6 +273,50 @@ mod tests {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
         assert_eq!(decode_wsl_text(&bytes), "WSL error");
+    }
+
+    #[test]
+    fn accepts_doctor_json_envelopes_and_rejects_other_output() {
+        assert!(is_doctor_envelope(
+            br#"{"schema_version":1,"ok":true,"command":"doctor","data":{"ready":false}}"#
+        ));
+        assert!(is_doctor_envelope(
+            br#"{"schema_version":1,"ok":false,"command":"doctor","error":{"code":"STATE_ROOT"}}"#
+        ));
+        assert!(!is_doctor_envelope(br#"{"ok":true}"#));
+        assert!(!is_doctor_envelope(b"WSL error"));
+    }
+
+    #[test]
+    fn wraps_a_missing_distro_as_wsl_start_failed() {
+        let mut stderr = vec![0xFF, 0xFE];
+        for unit in "There is no distribution with the supplied name.".encode_utf16() {
+            stderr.extend_from_slice(&unit.to_le_bytes());
+        }
+        let error = wsl_start_error("missing", &stderr, b"");
+        assert_eq!(error.code, "WSL_START_FAILED");
+        assert!(error.message.contains("did not start"));
+        assert!(error.message.contains("no distribution"));
+    }
+
+    #[test]
+    fn preserves_nonzero_linux_doctor_json_and_status() {
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/C", "exit", "2"])
+            .output()
+            .expect("cmd.exe");
+        let result = finish_doctor_json(
+            "Ubuntu",
+            std::process::Output {
+                status: output.status,
+                stdout:
+                    br#"{"schema_version":1,"ok":true,"command":"doctor","data":{"ready":false}}"#
+                        .to_vec(),
+                stderr: Vec::new(),
+            },
+        )
+        .expect("valid doctor output");
+        assert_eq!(result, 2);
     }
 
     #[test]
