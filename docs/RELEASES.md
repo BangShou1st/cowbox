@@ -1,5 +1,64 @@
 # Release verification
 
+## v0.7.0-m4 native Windows snapshot editing preview
+
+- Tag: `v0.7.0-m4`
+- Release commit: `3c41081`
+- Release workflow: https://github.com/BangShou1st/cowbox/actions/runs/43894692308
+- Release: https://github.com/BangShou1st/cowbox/releases/tag/v0.7.0-m4
+- Type: GitHub pre-release
+
+Published archive hashes:
+
+| Asset | SHA-256 |
+| --- | --- |
+| `cowbox-v0.7.0-m4-x86_64-unknown-linux-gnu.tar.gz` | `3daa9de3933e486f65a96a35824b0e94ed9071f14479b9b9d090d1bc4636ed7e` |
+| `cowbox-v0.7.0-m4-x86_64-pc-windows-msvc.zip` | `992cf90ae2cc85cb5b4c39411bd05fac8b2fb7f142cda4cddb893b2f580d4287` |
+
+Downloaded assets were re-hashed and matched their published `.sha256` files.
+
+Extracted binary hashes:
+
+| Binary | SHA-256 |
+| --- | --- |
+| Linux `cowbox` | `1940ddff8cf28afaa38d613b09dd4afd0a02723f251023fa88c7b65d51a44807` |
+| Windows `cowbox.exe` | `c6e38795ca27f59c39155e245cad8561b72846c71233053333606fa0397f52aa` |
+
+Acceptance used only the downloaded release assets:
+
+1. The Linux archive was extracted under `/tmp` on ext4. `--version` reported
+   `cowbox 0.7.0-m4`; `doctor --json` reported `ready=true`, Landlock ABI 3,
+   user namespaces, OverlayFS, `userxattr`, and ext4 state.
+2. The Windows ZIP was extracted. Its `cowbox.exe` reported `0.7.0-m4`.
+   `win doctor` reported `ready=true`, `ntfs_materialized_copy`, NTFS source and
+   state volumes, long-path support, and writable state.
+3. A native managed session on an `E:` project with `D:` state ran the full
+   flow. The editor saved `WRONG`; `win checkpoint` and `win diff` showed one
+   modified file; the host stayed at
+   `5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03`.
+   `win rollback 0` restored the managed file to `hello`. The editor saved
+   `RIGHT`; the dry-run preview targeted
+   `b4224f994c89262cdca3e998247bb72bba11cc62bd8560d01db7e16e554c8106`;
+   `win commit --yes` produced exactly that host hash. `README.md` stayed
+   unchanged, and no other host file changed.
+4. The same Windows flow was exercised with a real Codex agent using
+   `apply_patch` on the managed workspace. `WRONG` was checkpointed and rolled
+   back; `RIGHT` was checkpointed, previewed, and committed. The host changed
+   from `cd2eca3535741f27a8ae40c31b0c41d4057a7a7b912b33b9aed86485d1c84676`
+   to `fa4ba99a0d2e897274e12eaa54642c7b55828be171028b499b36cb02e848914d`;
+   only `src/hello.txt` changed.
+5. The downloaded EXE ran `setup --json --force`, which installed
+   `0.7.0-m4`. The installed Windows launcher hash matched the ZIP binary and
+   the installed WSL binary hash matched the Linux archive binary. `doctor`
+   reported ready, and `demo --offline --json` reported
+   `host_unchanged=true` with network policy `off`.
+6. Windows CI ran 14 native NTFS integration tests plus the existing agent/CLI
+   tests. Linux CI passed on Ubuntu 22.04 and 24.04, including the adversarial
+   and MCP suites. The measured 1k/10k-file and cross-volume results are in
+   [docs/BENCHMARKS.md](BENCHMARKS.md).
+
+No release asset was rebuilt or modified during acceptance.
+
 ## v0.6.0-m3 MCP agent snapshot preview
 
 - Tag: `v0.6.0-m3`
