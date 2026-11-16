@@ -27,6 +27,7 @@ pub fn apply(spec: &RunSpec) -> Result<()> {
         .filter(|path| path.exists())
         .collect();
     read_only.extend(spec.extra_ro_paths.iter().cloned());
+    read_only.extend(spec.cache_mounts.iter().map(|cache| cache.source.clone()));
 
     let mut read_write: Vec<PathBuf> = vec![
         spec.merged_dir.clone(),

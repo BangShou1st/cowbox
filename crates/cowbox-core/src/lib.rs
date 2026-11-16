@@ -8,6 +8,8 @@ pub mod policy;
 #[cfg(target_os = "linux")]
 pub mod commit;
 #[cfg(target_os = "linux")]
+pub mod compact;
+#[cfg(target_os = "linux")]
 pub mod diff;
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -22,9 +24,9 @@ pub use error::{CoreError, Result};
 pub use layout::SessionLayout;
 pub use model::{
     Capabilities, ChangeKind, CommitOptions, CommitRecoveryAction, CommitReport, DiffOptions,
-    EntryKind, ExecOutcome, FileChange, PendingRecovery, RecoveryReport, WhiteoutKind,
+    EntryKind, ExecOutcome, FileChange, LayerUsage, PendingRecovery, RecoveryReport, WhiteoutKind,
 };
-pub use policy::ExecPolicy;
+pub use policy::{ExecPolicy, HostCacheKind, HostCacheSource};
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -65,6 +67,12 @@ pub trait SandboxBackend: Send + Sync {
     fn finalize_commit(&self, layout: &SessionLayout) -> Result<()>;
 
     fn destroy_session(&self, layout: &SessionLayout) -> Result<()>;
+
+    fn layer_usage(&self, layout: &SessionLayout, logical_layers: &[u64]) -> Result<LayerUsage>;
+
+    /// Restore any source-layer permission changes left by an interrupted
+    /// compaction or read transaction. Callers must hold the session lock.
+    fn recover_compaction_permissions(&self, layout: &SessionLayout) -> Result<()>;
 }
 
 pub fn platform_backend() -> Box<dyn SandboxBackend> {
@@ -144,5 +152,18 @@ impl SandboxBackend for UnsupportedBackend {
 
     fn destroy_session(&self, _layout: &SessionLayout) -> Result<()> {
         Err(Self::unsupported())
+    }
+
+    fn layer_usage(&self, _layout: &SessionLayout, logical_layers: &[u64]) -> Result<LayerUsage> {
+        Ok(LayerUsage {
+            logical_steps: logical_layers.len(),
+            mounted_layers: logical_layers.len().saturating_add(1),
+            compact_layers: 0,
+            compacted_bytes: 0,
+        })
+    }
+
+    fn recover_compaction_permissions(&self, _layout: &SessionLayout) -> Result<()> {
+        Ok(())
     }
 }

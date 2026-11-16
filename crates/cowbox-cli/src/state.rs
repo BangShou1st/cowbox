@@ -240,7 +240,7 @@ impl SessionStore {
 
     pub fn disk_usage(&self, session_id: &str) -> u64 {
         let mut total = 0;
-        for entry in ["steps", "home", "tmp", "cache"] {
+        for entry in ["steps", "home", "tmp", "cache", "cache-overlays", "layers"] {
             total += directory_size(&self.session_dir(session_id).join(entry));
         }
         total

@@ -70,6 +70,16 @@ pub fn build_env(spec: &RunSpec) -> Vec<(String, String)> {
             "PIP_CACHE_DIR".to_string(),
             spec.cache_dir.join("pip").to_string_lossy().into_owned(),
         );
+        if spec.cache_mounts.iter().any(|cache| cache.tool == "pip") {
+            env.insert(
+                "PIP_FIND_LINKS".to_string(),
+                spec.cache_dir
+                    .join("pip")
+                    .join("wheelhouse")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
     }
 
     for (key, value) in &spec.env {

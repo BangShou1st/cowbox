@@ -1,4 +1,5 @@
 use crate::doctor;
+use crate::doctor::HostCacheReport;
 use crate::state::SessionRecord;
 use cowbox_core::Capabilities;
 use cowbox_core::{ChangeKind, EntryKind, FileChange};
@@ -20,6 +21,9 @@ pub struct Stats {
     pub session_id: String,
     pub status: String,
     pub steps: usize,
+    pub mounted_layers: usize,
+    pub compact_layers: usize,
+    pub compacted_bytes: u64,
     pub rollbacks: u64,
     pub orphans: usize,
     pub disk_bytes: u64,
@@ -165,7 +169,16 @@ pub fn print_log(record: &SessionRecord) {
 
 pub fn print_stats(stats: &Stats) {
     println!("Session {}  status={}", stats.session_id, stats.status);
-    println!("Steps:            {}", stats.steps);
+    println!("Steps (logical):  {}", stats.steps);
+    println!(
+        "Mounted layers:   {} (including live base)",
+        stats.mounted_layers
+    );
+    println!(
+        "Compacted layers: {} ({})",
+        stats.compact_layers,
+        format_bytes(stats.compacted_bytes)
+    );
     println!("Rollbacks:        {}", stats.rollbacks);
     println!("Orphans reaped:   {}", stats.orphans);
     println!("Incremental disk: {}", format_bytes(stats.disk_bytes));
@@ -193,7 +206,12 @@ pub fn print_stats(stats: &Stats) {
     );
 }
 
-pub fn print_doctor(capabilities: &Capabilities, state_root: &Path, ready: bool) {
+pub fn print_doctor(
+    capabilities: &Capabilities,
+    state_root: &Path,
+    host_caches: &[HostCacheReport],
+    ready: bool,
+) {
     println!("cowbox doctor ({})", env!("CARGO_PKG_VERSION"));
     println!("State root: {}", state_root.display());
     println!();
@@ -263,6 +281,33 @@ pub fn print_doctor(capabilities: &Capabilities, state_root: &Path, ready: bool)
         doctor::state_fs_ready(capabilities),
         state_detail,
     );
+    if host_caches.is_empty() {
+        println!("[ok] Host caches: none configured; sessions use isolated caches");
+    } else {
+        for cache in host_caches {
+            let paths = cache
+                .paths
+                .iter()
+                .map(|path| {
+                    format!(
+                        "{} {}",
+                        path.name,
+                        if path.available {
+                            "available"
+                        } else {
+                            "missing"
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            line(
+                &format!("{} host cache", cache.tool),
+                cache.available,
+                &format!("{} ({paths})", cache.source.display()),
+            );
+        }
+    }
     for note in &capabilities.notes {
         println!("  note: {note}");
     }

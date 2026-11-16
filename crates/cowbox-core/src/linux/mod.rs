@@ -11,16 +11,18 @@ pub use supervisor::supervisor_main;
 
 use crate::SandboxBackend;
 use crate::commit;
+use crate::compact::{self, MountLayer};
 use crate::diff;
 use crate::error::{CoreError, Result};
 use crate::layout::SessionLayout;
 use crate::manifest;
 use crate::model::{
-    Capabilities, CommitOptions, CommitReport, DiffOptions, ExecOutcome, FileChange,
+    Capabilities, CommitOptions, CommitReport, DiffOptions, ExecOutcome, FileChange, LayerUsage,
 };
 use crate::policy::ExecPolicy;
+use crate::policy::{HostCacheKind, HostCacheSource};
 use rustix::process::{Pid, Signal, getgid, getuid, kill_process_group};
-use spec::{ExecResult, RunSpec};
+use spec::{CacheMountSpec, ExecResult, RunSpec};
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -31,8 +33,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const CAPTURE_LIMIT: usize = 1024 * 1024;
-const MAX_ALIAS_LAYERS: usize = 150;
-const MAX_LOWERDIR_BYTES: usize = 3800;
 
 pub struct LinuxBackend;
 
@@ -98,24 +98,20 @@ impl SandboxBackend for LinuxBackend {
                 reason: format!("step directory {} already exists", step_dir.display()),
             });
         }
+        if !policy.isolate_caches && !policy.host_cache_sources.is_empty() {
+            return Err(CoreError::Config(
+                "host cache reuse requires isolate_caches = true".to_string(),
+            ));
+        }
+        let cache_mounts = build_cache_mounts(layout, &policy.host_cache_sources)?;
+        let mount_layers = compact::prepare_mount_layers(layout, step_id, parent_layers)?;
         fs::create_dir_all(layout.upper_dir(step_id))?;
         fs::create_dir_all(layout.work_dir(step_id))?;
         fs::create_dir_all(layout.home_dir())?;
         fs::create_dir_all(layout.tmp_dir())?;
         fs::create_dir_all(layout.cache_dir())?;
 
-        for layer in parent_layers {
-            if !layout.upper_dir(*layer).is_dir() {
-                return Err(CoreError::StateCorrupted {
-                    step: *layer,
-                    reason: format!(
-                        "missing parent layer {}",
-                        layout.upper_dir(*layer).display()
-                    ),
-                });
-            }
-        }
-        let (alias_dir, lower_dirs) = match build_layer_aliases(layout, step_id, parent_layers) {
+        let (alias_dir, lower_dirs) = match build_layer_aliases(layout, step_id, &mount_layers) {
             Ok(value) => value,
             Err(error) => {
                 let _ = fs::remove_dir_all(&step_dir);
@@ -142,6 +138,7 @@ impl SandboxBackend for LinuxBackend {
             isolate_caches: policy.isolate_caches,
             extra_ro_paths: policy.extra_ro_paths.clone(),
             extra_rw_paths: policy.extra_rw_paths.clone(),
+            cache_mounts,
             timeout_ms: policy
                 .timeout
                 .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
@@ -291,6 +288,14 @@ impl SandboxBackend for LinuxBackend {
         }
         Ok(())
     }
+
+    fn layer_usage(&self, layout: &SessionLayout, logical_layers: &[u64]) -> Result<LayerUsage> {
+        compact::inspect_layer_usage(layout, logical_layers)
+    }
+
+    fn recover_compaction_permissions(&self, layout: &SessionLayout) -> Result<()> {
+        compact::recover_pending_permissions(layout)
+    }
 }
 
 fn helper_exe() -> Result<PathBuf> {
@@ -300,29 +305,109 @@ fn helper_exe() -> Result<PathBuf> {
     Ok(std::env::current_exe()?)
 }
 
+fn build_cache_mounts(
+    layout: &SessionLayout,
+    sources: &[HostCacheSource],
+) -> Result<Vec<CacheMountSpec>> {
+    let mut mounts = Vec::new();
+    for source in sources {
+        if !source.root.is_dir() {
+            return Err(CoreError::Config(format!(
+                "configured {} host cache root is not a directory: {}",
+                source.kind.as_str(),
+                source.root.display()
+            )));
+        }
+        match source.kind {
+            HostCacheKind::Cargo => {
+                let before = mounts.len();
+                for name in ["registry", "git"] {
+                    let data = source.root.join(name);
+                    if data.is_dir() {
+                        mounts.push(cache_mount(
+                            layout,
+                            format!("cargo-{name}"),
+                            data,
+                            layout.cache_dir().join("cargo").join(name),
+                        ));
+                    }
+                }
+                if mounts.len() == before {
+                    return Err(CoreError::Config(format!(
+                        "configured Cargo host cache has no registry or git data directory under {}",
+                        source.root.display()
+                    )));
+                }
+            }
+            HostCacheKind::Npm => {
+                let data = source.root.join("_cacache");
+                if !data.is_dir() {
+                    return Err(CoreError::Config(format!(
+                        "configured npm host cache has no _cacache directory under {}",
+                        source.root.display()
+                    )));
+                }
+                mounts.push(cache_mount(
+                    layout,
+                    "npm".to_string(),
+                    data,
+                    layout.cache_dir().join("npm").join("_cacache"),
+                ));
+            }
+            HostCacheKind::Pip => mounts.push(cache_mount(
+                layout,
+                "pip".to_string(),
+                source.root.clone(),
+                layout.cache_dir().join("pip"),
+            )),
+        }
+    }
+    Ok(mounts)
+}
+
+fn cache_mount(
+    layout: &SessionLayout,
+    tool: String,
+    source: PathBuf,
+    destination: PathBuf,
+) -> CacheMountSpec {
+    let meta_dir = layout
+        .session_dir
+        .join("cache-overlays")
+        .join(tool.replace('/', "-"));
+    CacheMountSpec {
+        tool,
+        source,
+        destination,
+        upper_dir: meta_dir.join("upper"),
+        work_dir: meta_dir.join("work"),
+    }
+}
+
 fn build_layer_aliases(
     layout: &SessionLayout,
     step_id: u64,
-    parent_layers: &[u64],
+    mount_layers: &[MountLayer],
 ) -> Result<(PathBuf, Vec<PathBuf>)> {
-    if parent_layers.len() > MAX_ALIAS_LAYERS {
+    if mount_layers.len() > compact::MAX_MOUNT_LAYERS {
         return Err(CoreError::Config(format!(
-            "session has {} layers; M1 supports at most {MAX_ALIAS_LAYERS}. Commit or discard this session and start a new one.",
-            parent_layers.len()
+            "session has {} physical layers; at most {} can be mounted even after compaction.",
+            mount_layers.len(),
+            compact::MAX_MOUNT_LAYERS
         )));
     }
 
-    let alias_dir = std::env::temp_dir().join(format!("cw{}{}", layout.session_id, step_id));
+    let alias_dir = compact::alias_dir(layout, step_id);
     if alias_dir.exists() {
         fs::remove_dir_all(&alias_dir)?;
     }
     fs::create_dir_all(&alias_dir)?;
     fs::set_permissions(&alias_dir, fs::Permissions::from_mode(0o700))?;
 
-    let mut lower_dirs = Vec::with_capacity(parent_layers.len() + 1);
-    for layer in parent_layers.iter().rev() {
-        let alias = alias_dir.join(format!("l{layer}"));
-        if let Err(error) = std::os::unix::fs::symlink(layout.upper_dir(*layer), &alias) {
+    let mut lower_dirs = Vec::with_capacity(mount_layers.len() + 1);
+    for layer in mount_layers.iter().rev() {
+        let alias = alias_dir.join(&layer.alias);
+        if let Err(error) = std::os::unix::fs::symlink(&layer.upper_dir, &alias) {
             let _ = fs::remove_dir_all(&alias_dir);
             return Err(error.into());
         }
@@ -335,10 +420,11 @@ fn build_layer_aliases(
         .filter_map(|path| path.to_str())
         .map(|path| path.len() + 1)
         .sum::<usize>();
-    if option_bytes > MAX_LOWERDIR_BYTES {
+    if option_bytes > compact::MAX_LOWERDIR_BYTES {
         let _ = fs::remove_dir_all(&alias_dir);
         return Err(CoreError::Config(format!(
-            "lowerdir option would be {option_bytes} bytes; limit is {MAX_LOWERDIR_BYTES}. Commit or discard this session and start a new one."
+            "lowerdir option would be {option_bytes} bytes; limit is {}. Layer compaction could not reduce it.",
+            compact::MAX_LOWERDIR_BYTES
         )));
     }
     Ok((alias_dir, lower_dirs))

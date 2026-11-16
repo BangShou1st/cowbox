@@ -20,10 +20,10 @@
 </div>
 
 > [!IMPORTANT]
-> cowbox is an **M1.5 preview**. The engine targets Linux and WSL2; Windows ships
-> a native launcher that delegates into WSL. MCP proxying, a native Windows
-> file-edit backend, macOS support, and network isolation are later milestones.
-> See [docs/ROADMAP.md](docs/ROADMAP.md) for the staged plan.
+> cowbox is an **M2 performance preview**. The engine targets Linux and WSL2;
+> Windows ships a native launcher that delegates into WSL. MCP proxying, a
+> native Windows file-edit backend, macOS support, and network isolation are
+> later milestones. See [docs/ROADMAP.md](docs/ROADMAP.md) for the staged plan.
 
 ## Why cowbox
 
@@ -55,7 +55,7 @@ cowbox commit                # atomically apply the net changes to the host
 cowbox commit --recover      # reconcile an interrupted commit (restore or finish)
 cowbox discard               # throw the sandbox state away
 cowbox doctor                # check kernel, OverlayFS, xattr, Landlock
-cowbox stats                 # inspect steps, rollbacks, orphans, disk use
+cowbox stats                 # inspect logical steps, mount layers, disk use
 cowbox sessions              # list active and finalized sessions across projects
 cowbox gc --dry-run          # preview old session state that can be removed
 ```
@@ -88,6 +88,11 @@ Chrome Trace JSON of namespace, mount, diff, and commit spans.
 - Every step gets a writable **upperdir** on the WSL/Linux ext4 filesystem.
 - A step is frozen by dropping the mount; the next step stacks the previous
   upper layers below its own upperdir.
+- Long sessions compact old physical mount layers while retaining every logical
+  DAG step. Compression is derived from upper layers plus the base manifest,
+  validated in a temporary directory, and published atomically. `diff`,
+  `commit`, rollback, and branching continue to use the original logical
+  layers.
 - `rollback` is a DAG head-pointer move. The old layers stay available for
   audit and for branching.
 - `commit` computes the net diff from the base, checks for host drift, backs up
@@ -199,15 +204,48 @@ shows their disk use, and `cowbox gc` removes finalized sessions older than
 seven days. Active sessions are never deleted. Use `--all` to ignore the age
 threshold, `--dry-run` to preview, and `--yes` for non-interactive execution.
 
+### Long sessions
+
+Sessions that cross the physical layer or lowerdir-length limit compact the
+oldest part of the active ancestor chain automatically and keep the most recent
+layers uncompressed. `cowbox stats` reports both logical steps and the physical
+mount count, plus compacted-layer storage. A compaction cache is reused only
+when its recorded source list is an exact prefix of the current branch.
+
+### Host cache reuse
+
+Cargo, npm, and pip can explicitly reuse a host cache as a read-only data
+source. Add paths to `.cowbox.toml`:
+
+```toml
+[sandbox.host_caches]
+cargo = "/home/you/.cargo"     # mounts only registry/ and git/
+npm = "/home/you/.npm"         # mounts only _cacache/
+pip = "/home/you/.cache/pip"   # mounts cache data, including wheelhouse/
+```
+
+`true` selects the default cache under the host home; `false` keeps the original
+isolated-only behavior. cowbox mounts only the tool's data directories as
+read-only lower layers over a session-specific writable cache. Lock/index
+updates, new downloads, and extracted packages are written to the session
+cache, not the host. Credentials and tool configuration stay in the isolated
+session home. `cowbox doctor` lists each configured source and whether its data
+directories exist.
+
+For pip, a `wheelhouse/` directory under the configured cache root is exposed
+through `PIP_FIND_LINKS`, so pinned, hashed requirements can install with
+`--no-index` without network access. Other downloads still use the normal index
+and land in the session cache.
+
 ## Safety model
 
-- cowbox M1 uses **Landlock ABI 3** for path-based read/write fencing and a
+- cowbox uses **Landlock ABI 3** for path-based read/write fencing and a
   **PID namespace** plus a PID 1 supervisor for process-tree cleanup.
 - The host workspace is treated as **read-only during an active session**. The
   lowerdir is the live workspace, so external edits are detected at commit time
   through a base manifest; `cowbox commit` refuses by default and `--force`
   still takes a backup.
-- M1 does **not** isolate the network. A process inside the sandbox can bind
+- cowbox does **not** isolate the network. A process inside the sandbox can bind
   host ports and make network connections. Network policy is planned for M2.
 - M1 is a guard against **accidental damage and agent mistakes**, not a
   hardened sandbox for hostile code. Kernel exploits and deliberately malicious
@@ -225,6 +263,8 @@ threshold, `--dry-run` to preview, and `--yes` for non-interactive execution.
   not a power-loss or storage-failure guarantee.
 - Only `user.*` xattrs are preserved. Non-user xattr namespaces are kernel or
   security-managed and are left untouched.
+- Configured host caches are mounted read-only and only their data directories
+  are exposed. Session writes copy up into the session cache.
 - `.git` is never committed, even with `--include-excluded`. Device nodes,
   FIFOs, and sockets are refused. setuid/setgid bits are cleared on commit.
 - cowbox never silently falls back to a full directory copy when the OS CoW
@@ -237,22 +277,23 @@ See [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md) for the full threat model.
 We only publish numbers that were measured on a real machine. The harness and
 methodology live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-The completed M2 round compared the `v0.3.0-m1` release baseline with the
-optimized candidate on WSL2 ext4, using 20 samples per scenario, one excluded
-warm-up, and a fresh session for every sample.
+The final M2 regression round compared the published `v0.4.0-m2` binary with
+the long-session/cache candidate on WSL2 ext4. Each scenario used 20 samples,
+one excluded warm-up, and a fresh session for every sample.
 
 | Scenario | 10,000 files | 200,000 files |
 | --- | ---: | ---: |
-| First `cowbox run -- true` (includes manifest capture) | 43.29 ms | 163.14 ms |
-| Subsequent run with 1 parent layer | 38.43 ms | 38.55 ms |
-| `cowbox diff` with 10 changed files | 24.71 ms | 388.55 ms |
+| First `cowbox run -- true` (includes manifest capture) | 34.95 / 39.40 ms | 130.59 / 143.40 ms |
+| Subsequent run with 1 parent layer | 29.68 / 35.55 ms | 28.65 / 31.33 ms |
+| `cowbox diff` with 10 changed files | 5.88 / 10.78 ms | 89.25 / 93.31 ms |
 
-Values are medians of complete CLI wall-clock durations. A 10,000-file step with
-150 parents is accepted, and the next step is rejected with `CONFIG_ERROR`.
+Cells are median / P95 of complete CLI wall-clock durations. The 10,000-file
+and 200,000-file first-run limits of 60/80 ms and 150/200 ms pass, as do the
+10-file diff medians of 20 ms and 200 ms. A real 300-step session completed
+with automatic compaction at steps 151 and 268.
 
 See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for full statistics, fixtures,
-machine details, caveats, and the exact rerun command. First-run P95 measured
-47.235 ms at 10,000 files and 166.94 ms at 200,000 files. P99 is not separately
+machine details, caveats, and the exact rerun command. P99 is not separately
 instrumented yet.
 
 ## Status and roadmap
@@ -261,7 +302,7 @@ instrumented yet.
 | --- | --- | --- |
 | **M1** | Linux/WSL2 CLI, snapshot DAG, OverlayFS, Landlock, commit journal, tests, benchmarks | Preview available |
 | **M1.5** | Windows launcher, `setup`, multi-harness skill installer, project rules and policy | Preview available |
-| **M2** | Network policy (seccomp or newer Landlock), cache bind mounts, 200k-file benchmarks, blocked-write auditing | In progress |
+| **M2** | Long sessions, read-only host caches, performance work, 200k-file benchmarks | Preview available; network policy remains planned |
 | **M3** | MCP proxy with `cowbox_diff` / `cowbox_rollback` / `cowbox_commit` meta-tools | Planned |
 | **M4** | Native Windows ReFS + Job Object backend, macOS backend, eval suite and public leaderboard | Planned |
 

@@ -94,6 +94,10 @@ It must be outside the workspace and on an xattr-capable Linux filesystem.
         ├── home/                        # redirected HOME
         ├── tmp/                         # redirected TMPDIR
         ├── cache/                       # redirected caches
+        ├── cache-overlays/              # session writable halves of host caches
+        ├── layers/
+        │   ├── compacted/<key>/         # validated physical mount-layer cache
+        │   └── tmp/                     # unpublished compaction attempts
         ├── events.jsonl                 # run/rollback/commit/discard audit
         ├── lock                         # flock for workspace mutation
         └── commit/<journal>/            # phase meta, ops, copy + link backups
@@ -121,6 +125,7 @@ sequenceDiagram
     Helper->>Helper: unshare(CLONE_NEWPID)
     Helper->>Sup: spawn __supervisor (PID 1)
     Sup->>Sup: mount private procfs
+    Sup->>Sup: mount read-only host caches over session caches
     Sup->>Sup: apply Landlock policy
     Sup->>Cmd: spawn command
     Cmd-->>Sup: exit status
@@ -159,6 +164,95 @@ userxattr
 The lower layers are ordered topmost-first. The base workspace remains the live
 host directory. That is why the host must be treated as read-only while a
 session is active.
+
+### Layer compaction
+
+The DAG remains entirely logical. Compaction changes only the physical lower
+layers passed to OverlayFS when the active branch approaches the 150-layer or
+3800-byte `lowerdir` limit.
+
+Before creating a step, core scans existing compaction metadata and reuses a
+compacted layer only when its recorded logical source list is an exact prefix of
+the active root-to-head chain. When another compaction is required, core:
+
+1. selects the oldest contiguous prefix and keeps up to 32 recent logical
+   layers uncompressed;
+2. replays only those upper layers, using the base manifest to distinguish
+   additions, modifications, type changes, and deletions;
+3. materializes the net result in `layers/tmp/`, normalizing whiteouts to
+   `user.overlay.whiteout`, preserving opaque directories, modes, symlinks,
+   `user.*` xattrs, and hardlink groups;
+4. analyzes the temporary result again and compares namespace semantics,
+   content hashes, metadata, xattrs, whiteouts, opaque directories, and
+   hardlink partitions with the source layers;
+5. measures the temporary result while its permission elevation is still
+   active;
+6. restores every source and temporary mode, writes `layer.json` with the
+   source layer ids and base-manifest fingerprint, then publishes the directory
+   with an atomic rename.
+
+The session lock serializes compaction with other session mutations and with
+readers that need source-layer metadata. A process interruption leaves either
+an unpublished temporary directory or a complete published layer; the next run
+can clean up and retry. `stats` reports logical steps, physical lower layers
+(including the live base), compacted-layer count, and allocated compacted bytes.
+Finalized sessions include compaction artifacts in normal `gc` removal.
+
+#### Permission transaction
+
+An unprivileged process cannot read a `000` file or list a directory without
+owner read/execute permission. Compaction, `diff`, and `commit` therefore use a
+journaled permission transaction instead of a best-effort copy:
+
+1. The journal is created lazily on the first mode change. New attempts write
+   `layers/tmp/<attempt>.permissions.jsonl`; the legacy in-tree
+   `layers/tmp/<attempt>/source-permissions.jsonl` location is still recovered.
+2. Every directory mode is journaled and fsynced before it is elevated.
+   Unreadable regular-file records are collected, fsynced as a batch, and only
+   then given temporary read permission.
+3. Readers (`diff` and `commit`) take the same exclusive session lock as
+   compaction and replay pending journals before scanning. A started
+   compaction and every subsequent reader therefore agree on the original
+   modes.
+4. Restore handles non-directories first and directories deepest-first.
+   Missing ancestors are temporarily reopened while retrying, so a previous
+   interruption that already restored a parent to `000` is recoverable.
+5. The journal is removed only after every recorded mode has been restored.
+   A final JSON line without a newline is treated as an incomplete append and
+   only the complete prefix is restored. A malformed complete line, conflicting
+   duplicate, unsafe path, or invalid mode is a state-corruption error and keeps
+   the journal for diagnosis.
+6. The temporary compacted tree is measured before its modes are restored, so
+   `000` directories cannot make the disk-usage walk fail.
+
+Source layers are restored before a successful command returns. If a command
+fails or is interrupted after a mode change, it leaves either the original
+modes or a durable journal that the next reader or writer recovers under the
+session lock.
+
+`diff` and `commit` always read `steps/<n>/upper` for the logical chain. They do
+not substitute a compacted layer, so historical rollback and branching retain
+the original per-step semantics.
+
+### Host cache overlays
+
+When `.cowbox.toml` enables a host cache, the supervisor mounts a second OverlayFS
+inside the session mount namespace before applying Landlock:
+
+```text
+lowerdir=<host cache data, read-only>
+upperdir=<session>/cache-overlays/<tool>/upper
+workdir=<session>/cache-overlays/<tool>/work
+userxattr
+```
+
+The destination is the same path already exported as `CARGO_HOME`, npm's
+`NPM_CONFIG_CACHE`, or `PIP_CACHE_DIR`. Only cache data is mounted: Cargo
+`registry/` and `git/`, npm `_cacache/`, and the pip cache directory. Host
+credentials and configuration files are not part of the mount and remain
+outside the sandbox. Any cache write copies up to the session upper layer.
+Pip additionally receives a `PIP_FIND_LINKS` path for an optional read-only
+`wheelhouse/` under the cache root.
 
 ## 6. Diff
 
@@ -227,6 +321,14 @@ External edits cause recovery to stop with an explicit error and retain the
 journal and backups. The guarantee covers process interruption, not power loss
 or storage failure.
 
+Recovery also treats the commit's own `0700` directory preparation as a valid
+intermediate state. Before restoring a directory tree, it walks the host subtree
+and compares every entry with the journal operations and the base manifest.
+Rollback stops when it finds unexpected entries, missing base entries, changed
+descendants, or paths it cannot verify. Temporary-looking names are checked
+like any other path. The journal and backups remain available so the user can
+preserve the conflicting content before retrying recovery.
+
 `.git` and `.cowbox` are never committed. Default excluded paths such as
 `target/`, `node_modules/`, and `.venv/` are ignored unless
 `--include-excluded` is explicit.
@@ -236,11 +338,13 @@ or storage failure.
 `tracing` spans cover namespace setup, mount, Landlock, diff, and commit.
 `--trace-chrome` emits a Chrome Trace JSON file. `doctor` runs static capability
 probes (namespace, overlay, `userxattr`, Landlock ABI, state filesystem, disk
-space); the whiteout kind is confirmed by the first real run, and latency is
-measured by `scripts/bench.sh`. `stats` reports step count, rollback count,
-reaped orphans, incremental disk use, and whether network isolation is active.
+space) and reports configured Cargo/npm/pip host cache data sources. The
+whiteout kind is confirmed by the first real run, and latency is measured by
+`scripts/bench.sh`. `stats` reports logical step count, physical mount layers,
+compacted storage, rollback count, reaped orphans, incremental disk use, and
+whether network isolation is active.
 
-M1 does **not** count blocked writes: Landlock denials are silent. The field is
+cowbox does **not** count blocked writes: Landlock denials are silent. The field is
 reported as not instrumented rather than invented.
 
 ## 9. WSL2 bridge notes
@@ -266,3 +370,5 @@ wrapper over `wsl.exe`) is M3. For M1:
 | Host file changed during session | commit conflict; `--force` still backs up |
 | Commit interrupted | journal restore; manual recovery path if restore fails |
 | Whiteout format differs from expectation | both char-device and xattr forms supported |
+| Layer compaction interrupted | journaled modes restored before readers or retry; temporary output is discarded |
+| Configured host cache data is missing | actionable config error before the command runs |

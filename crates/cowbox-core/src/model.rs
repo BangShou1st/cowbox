@@ -87,6 +87,15 @@ pub struct ExecOutcome {
     pub stderr_truncated: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LayerUsage {
+    pub logical_steps: usize,
+    /// Physical lower layers presented to OverlayFS, including the live base.
+    pub mounted_layers: usize,
+    pub compact_layers: usize,
+    pub compacted_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiffOptions {
     pub include_excluded: bool,

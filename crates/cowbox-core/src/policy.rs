@@ -13,6 +13,29 @@ pub const DEFAULT_EXCLUDES: &[&str] = &[
     "dist",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostCacheKind {
+    Cargo,
+    Npm,
+    Pip,
+}
+
+impl HostCacheKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cargo => "cargo",
+            Self::Npm => "npm",
+            Self::Pip => "pip",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostCacheSource {
+    pub kind: HostCacheKind,
+    pub root: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecPolicy {
     pub extra_ro_paths: Vec<PathBuf>,
@@ -24,6 +47,7 @@ pub struct ExecPolicy {
     pub excluded: Vec<String>,
     pub capture_output: bool,
     pub cwd: Option<PathBuf>,
+    pub host_cache_sources: Vec<HostCacheSource>,
 }
 
 impl Default for ExecPolicy {
@@ -41,6 +65,7 @@ impl Default for ExecPolicy {
                 .collect(),
             capture_output: false,
             cwd: None,
+            host_cache_sources: Vec::new(),
         }
     }
 }

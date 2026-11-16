@@ -21,11 +21,21 @@ pub struct RunSpec {
     pub isolate_caches: bool,
     pub extra_ro_paths: Vec<PathBuf>,
     pub extra_rw_paths: Vec<PathBuf>,
+    pub cache_mounts: Vec<CacheMountSpec>,
     pub timeout_ms: Option<u64>,
     pub result_path: PathBuf,
     pub ready_path: PathBuf,
     pub go_path: PathBuf,
     pub capture_output: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheMountSpec {
+    pub tool: String,
+    pub source: PathBuf,
+    pub destination: PathBuf,
+    pub upper_dir: PathBuf,
+    pub work_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -63,7 +63,7 @@ Use cowbox for:
 
 Do not use cowbox for `ls`, `cat`, `rg`, `git status`, or other read-only
 commands. Do not use it for a single-file edit that does not touch local state.
-Do not use it as a malware sandbox: M1 does not isolate the network, undo
+Do not use it as a malware sandbox: cowbox does not isolate the network, undo
 remote database changes, or stop a process from exfiltrating readable files.
 
 ## Typical loop

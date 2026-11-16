@@ -6,6 +6,75 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Automatic physical layer compaction for long sessions. The logical snapshot
+  DAG remains unchanged while older contiguous ancestor layers are merged at
+  the 150-layer or lowerdir-length boundary. Compaction preserves char-device
+  and xattr whiteouts, opaque directories, type changes, symlinks, `user.*`
+  xattrs, and hardlink groups; validates in a temporary directory; and publishes
+  under an atomic rename. Reuse requires an exact source-prefix match on the
+  active branch. `stats` now reports logical steps, mounted layers, compacted
+  layer count, and compacted storage.
+- Explicit read-only host cache reuse for Cargo, npm, and pip through
+  `[sandbox.host_caches]`. Only cache data directories are mounted; index
+  refreshes, downloads, and other writes copy up into the session cache.
+  Credentials and configuration remain in the isolated session home. `doctor`
+  reports configured sources and data-directory availability.
+- Pip wheelhouse reuse through `PIP_FIND_LINKS` under the configured cache root,
+  supporting pinned, hashed, offline installs.
+
+### Changed
+
+- `cowbox stats` preserves the existing `steps` field and adds `logical_steps`,
+  `mounted_layers`, `compact_layers`, and `compacted_bytes`.
+- Session disk accounting includes compaction artifacts and host-cache overlay
+  storage. Finalized sessions include both in normal `gc` removal.
+- The M2 wall-clock harness now follows a 300-step session across repeated
+  compaction boundaries, records every step, compaction events, mounted-layer
+  counts, and logical/allocated disk growth. The fixed-binary regression round
+  is recorded in `docs/BENCHMARKS.md`.
+- The M2 harness can measure a compaction step after populating an upper layer
+  with a deterministic entry count, and `scripts/acceptance_m2.py` records a
+  300-step real-change session through two compactions, rollback, branching,
+  host drift, commit, and commit recovery.
+
+### Fixed
+
+- Layer compaction now clears descendants when a higher layer replaces a
+  directory with a file or symlink.
+- Compaction copies `user.*` xattrs before restoring read-only file or
+  directory modes.
+- Interrupted compaction can remove stale temporary trees that contain
+  read-only entries before retrying.
+- State cleanup and shape validation use path-range operations instead of
+  scanning every upper entry for every change, removing the previous quadratic
+  compaction cost.
+- The benchmark harness rejects unexpected candidate `CONFIG_ERROR` exits;
+  only an explicit `--allow-legacy-layer-limit` accepts the pre-compaction
+  release binary stopping after step 151.
+- Compaction temporarily records and elevates source-layer read permissions for
+  `000` files and directories, then restores the original modes after validation
+  or from a durable journal after interruption.
+- Nested `000` directories are now fully readable during compaction, and the
+  compacted layer is measured before temporary modes are restored.
+- Permission journals live outside the disposable compilation tree, are removed
+  only after every mode is restored, and are replayed by `diff`, `commit`
+  preview, and subsequent runs under the session lock.
+- Permission recovery restores non-directories first and directories
+  deepest-first, reopens parents that an earlier interruption restored to
+  `000`, and accepts a truncated final journal line while preserving errors for
+  genuinely malformed complete records.
+- Commit ordering now supports restrictive `000` directories and files,
+  including directory mode finalization after child writes and recovery checks
+  that cannot traverse a confirmed `000` parent.
+- Commit recovery now accepts its own `0700` directory preparation state,
+  verifies every host entry in affected directory trees against the journal and
+  base manifest, and refuses to delete or overwrite user content added after an
+  interruption; the journal and backups stay available for retry.
+- The adversarial long-session view check now runs with `set -e`, so every file,
+  mode, xattr, symlink, and hardlink assertion can fail CI independently.
+
 ## [0.4.0-m2] - 2026-11-16
 
 ### Added

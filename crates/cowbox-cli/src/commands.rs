@@ -198,6 +198,7 @@ fn command_diff(args: &DiffArgs) -> CliResult<i32> {
         .exit(2));
     }
     let ctx = setup()?;
+    let _lock = ctx.store.lock()?;
     let record = active_record(&ctx)?;
     let target = args.step.unwrap_or(record.dag.head_step);
     if !record.dag.nodes.contains_key(&target) {
@@ -209,7 +210,9 @@ fn command_diff(args: &DiffArgs) -> CliResult<i32> {
     let chain = target_chain(&record, target)?;
     let options = ctx.config.to_diff_options(args.all);
     let layout = ctx.store.layout(&record.session_id);
-    let changes = backend().diff_layers(&layout, &[], &chain, &options)?;
+    let backend = backend();
+    backend.recover_compaction_permissions(&layout)?;
+    let changes = backend.diff_layers(&layout, &[], &chain, &options)?;
     let summary = render::summarize(&changes);
     if args.json {
         json::print(&json::ok(
@@ -330,7 +333,9 @@ fn command_commit(args: &CommitArgs) -> CliResult<i32> {
         .config
         .to_commit_options(args.force, true, args.include_excluded);
     let layout = ctx.store.layout(&record.session_id);
-    let preview = backend().commit_layers(&layout, &chain, &preview_options)?;
+    let backend = backend();
+    backend.recover_compaction_permissions(&layout)?;
+    let preview = backend.commit_layers(&layout, &chain, &preview_options)?;
     if !preview.conflicts.is_empty() && !preview_options.force {
         let paths = preview
             .conflicts
@@ -401,7 +406,7 @@ fn command_commit(args: &CommitArgs) -> CliResult<i32> {
     let options = ctx
         .config
         .to_commit_options(args.force, false, args.include_excluded);
-    let report = backend().commit_layers(&layout, &chain, &options)?;
+    let report = backend.commit_layers(&layout, &chain, &options)?;
     if !report.conflicts.is_empty() && !options.force {
         let paths = report
             .conflicts
@@ -492,6 +497,7 @@ fn command_commit_recover(ctx: &Context, args: &CommitArgs) -> CliResult<i32> {
     }
 
     let layout = ctx.store.layout(&record.session_id);
+    backend().recover_compaction_permissions(&layout)?;
     let report = backend().recover_commit(&layout)?;
     match report.action {
         CommitRecoveryAction::RestoreHost | CommitRecoveryAction::AlreadyRolledBack => {
@@ -828,6 +834,9 @@ fn command_doctor(args: &DoctorArgs) -> CliResult<i32> {
     #[cfg(not(windows))]
     {
         let context = doctor::diagnostic_context()?;
+        let workspace = workspace::find_workspace_root(&std::env::current_dir()?)?;
+        let config = Config::load(&workspace)?;
+        let host_caches = doctor::host_cache_reports(&config, &workspace)?;
         let capabilities = backend().probe(&context.state_root)?;
         let ready = doctor::capabilities_ready(&capabilities);
         if args.json {
@@ -838,10 +847,11 @@ fn command_doctor(args: &DoctorArgs) -> CliResult<i32> {
                     "ready": ready,
                     "capabilities": capabilities,
                     "state_root": context.state_root,
+                    "host_caches": host_caches,
                 }),
             ))?;
         } else {
-            render::print_doctor(&capabilities, &context.state_root, ready);
+            render::print_doctor(&capabilities, &context.state_root, &host_caches, ready);
         }
         Ok(if ready { 0 } else { 1 })
     }
@@ -1166,13 +1176,16 @@ struct GcPlan {
 fn command_stats(args: &StatsArgs) -> CliResult<i32> {
     let ctx = setup()?;
     let record = active_record(&ctx)?;
+    let backend = backend();
+    let layout = ctx.store.layout(&record.session_id);
+    let usage = backend.layer_usage(&layout, &record.dag.active_layer_chain())?;
     let orphans = record
         .dag
         .nodes
         .values()
         .map(|node| node.orphans_reaped)
         .sum();
-    let landlock_abi = backend()
+    let landlock_abi = backend
         .probe(&ctx.state_root)
         .ok()
         .and_then(|capabilities| capabilities.landlock_abi);
@@ -1180,6 +1193,9 @@ fn command_stats(args: &StatsArgs) -> CliResult<i32> {
         session_id: record.session_id.clone(),
         status: format!("{:?}", record.status),
         steps: record.dag.nodes.len().saturating_sub(1),
+        mounted_layers: usage.mounted_layers,
+        compact_layers: usage.compact_layers,
+        compacted_bytes: usage.compacted_bytes,
         rollbacks: record.rollback_count,
         orphans,
         disk_bytes: ctx.store.disk_usage(&record.session_id),
@@ -1193,6 +1209,10 @@ fn command_stats(args: &StatsArgs) -> CliResult<i32> {
             Some(&record),
             json!({
                 "steps": stats.steps,
+                "logical_steps": usage.logical_steps,
+                "mounted_layers": stats.mounted_layers,
+                "compact_layers": stats.compact_layers,
+                "compacted_bytes": stats.compacted_bytes,
                 "rollbacks": stats.rollbacks,
                 "orphans_reaped": stats.orphans,
                 "disk_bytes": stats.disk_bytes,

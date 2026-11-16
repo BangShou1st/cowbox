@@ -20,7 +20,7 @@
 </div>
 
 > [!IMPORTANT]
-> cowbox 目前是 **M1.5 预览版**。引擎运行在 Linux/WSL2，Windows 提供原生启动器
+> cowbox 目前是 **M2 性能预览版**。引擎运行在 Linux/WSL2，Windows 提供原生启动器
 > 并委托到 WSL。MCP 代理、Windows 原生文件编辑后端、macOS 和网络隔离属于后续
 > 里程碑。分阶段计划见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
@@ -52,7 +52,7 @@ cowbox commit                # 把净变更原子写回宿主机
 cowbox commit --recover      # 处理中断 commit：恢复宿主机或完成会话收尾
 cowbox discard               # 丢弃沙盒状态
 cowbox doctor                # 检查内核、OverlayFS、xattr、Landlock
-cowbox stats                 # 查看步数、回滚、孤儿进程、磁盘占用
+cowbox stats                 # 查看逻辑步数、实际挂载层、磁盘占用
 cowbox sessions              # 列出所有项目的 active 与 finalized session
 cowbox gc --dry-run          # 预览可清理的旧 session 状态
 ```
@@ -84,6 +84,9 @@ diff、commit 的 Chrome Trace JSON。
 - 真实 workspace 作为只读 **lowerdir**。
 - 每个 step 在 WSL/Linux ext4 上获得一个可写 **upperdir**。
 - step 结束时卸载即冻结；下一步把之前的 upper 层叠在下面。
+- 长会话会压缩旧的物理挂载层，但保留全部逻辑 DAG step；压缩结果由 upper 与
+  base manifest 推导、先验证再原子发布。`diff`、`commit`、回滚和分支始终使用
+  原始逻辑层。
 - `rollback` 只是移动 DAG head 指针，旧层仍可用于审计和分支。
 - `commit` 计算 base→head 净变更，检查宿主机漂移，备份到 journal，再按安全顺序落盘。
 - commit 会把 SQLite 的 `-wal`/`-shm`/`-journal` sidecar 与数据库一起处理，保留
@@ -185,13 +188,32 @@ commit 或 discard 后的 session 会保留用于审计。`cowbox sessions` 可�
 `cowbox gc` 默认删除 7 天前的 finalized session，绝不会删除 active session。
 `--all` 忽略时间阈值，`--dry-run` 预览，`--yes` 用于非交互执行。
 
+### 长会话与宿主缓存
+
+跨过物理层数或 lowerdir 长度限制时，cowbox 会自动压缩当前分支最旧的一段祖先层，
+保留近期层不压缩。只有压缩记录的逻辑层列表与当前分支祖先链完全匹配时才会复用。
+
+Cargo、npm 和 pip 可以在 `.cowbox.toml` 中显式复用宿主缓存：
+
+```toml
+[sandbox.host_caches]
+cargo = "/home/you/.cargo"     # 只挂载 registry/ 与 git/
+npm = "/home/you/.npm"         # 只挂载 _cacache/
+pip = "/home/you/.cache/pip"   # 挂载缓存数据，包括 wheelhouse/
+```
+
+`true` 使用宿主 home 下的默认缓存，`false` 保持原来的纯隔离模式。缓存数据以只读
+lowerdir 挂载，索引刷新、新下载和解包写入会话自己的 upper 缓存；宿主凭据和工具
+配置仍留在隔离 HOME 中。`cowbox doctor` 会列出配置的缓存源及可用状态。pip 的
+`wheelhouse/` 会通过 `PIP_FIND_LINKS` 暴露，支持带哈希锁定的离线安装。
+
 ## 安全模型
 
-- M1 使用 **Landlock ABI 3** 做路径级读写围栏，使用 **PID namespace** 与 PID 1
+- cowbox 使用 **Landlock ABI 3** 做路径级读写围栏，使用 **PID namespace** 与 PID 1
   supervisor 做进程树回收。
 - 活跃 session 期间，宿主机 workspace 视为**只读**。lowerdir 是实时目录，因此
   commit 通过 base manifest 检测外部修改；默认拒绝，`--force` 也会先备份。
-- M1 **不隔离网络**。沙盒内进程可以绑定宿主机端口、访问网络。网络策略计划在 M2。
+- cowbox **不隔离网络**。沙盒内进程可以绑定宿主机端口、访问网络。网络策略计划在 M2。
 - M1 防的是**误操作和 Agent 失控**，不是恶意代码的硬化沙盒。内核漏洞与蓄意恶意
   二进制不在威胁模型内。
 - `cowbox commit` 在终端中要求人工确认；非交互调用只有在取得人工批准后使用
@@ -202,6 +224,7 @@ commit 或 discard 后的 session 会保留用于审计。`cowbox sessions` 可�
   记录与 active 指针清除均已持久化之后。恢复发现受影响路径被外部修改时会报错并
   保留备份材料。这里保证的是进程中断恢复，不包括断电或存储故障保证。
 - 只保留 `user.*` xattr；其他 xattr 命名空间由内核或安全模块管理，不会被改写。
+- 宿主缓存只读且只暴露缓存数据目录；会话写入 copy-up 到会话缓存。
 - `.git` 永远不提交，即使使用 `--include-excluded`。device、FIFO、socket 拒绝提交；
   setuid/setgid 位在 commit 时清除。
 - OverlayFS 不可用时，cowbox 不会静默降级为全量目录复制，而是返回明确错误。
@@ -212,21 +235,21 @@ commit 或 discard 后的 session 会保留用于审计。`cowbox sessions` 可�
 
 只发布真实机器上测出的数字。测试方法与脚本见 [docs/BENCHMARKS.md](docs/BENCHMARKS.md)。
 
-已完成的 M2 对比轮在 WSL2 ext4 上比较 `v0.3.0-m1` 发布基线与优化候选，每个
-场景使用 20 个样本、1 个不计入统计的预热样本，并且每个样本都使用全新会话。
+最终 M2 回归轮在 WSL2 ext4 上比较已发布的 `v0.4.0-m2` 二进制与长会话/缓存候选，
+每个场景使用 20 个样本、1 个不计入统计的预热样本，并且每个样本都使用全新会话。
 
 | 场景 | 10,000 文件 | 200,000 文件 |
 | --- | ---: | ---: |
-| 首次 `cowbox run -- true`（含清单采集） | 43.29 ms | 163.14 ms |
-| 固定 1 个父层的后续 run | 38.43 ms | 38.55 ms |
-| 10 个文件变更的 `cowbox diff` | 24.71 ms | 388.55 ms |
+| 首次 `cowbox run -- true`（含清单采集） | 34.95 / 39.40 ms | 130.59 / 143.40 ms |
+| 固定 1 个父层的后续 run | 29.68 / 35.55 ms | 28.65 / 31.33 ms |
+| 10 个文件变更的 `cowbox diff` | 5.88 / 10.78 ms | 89.25 / 93.31 ms |
 
-表中是完整 CLI 墙钟耗时的中位数。当前层限制接受“150 个父层再执行一步”，随后
-下一步返回 `CONFIG_ERROR`。
+表中是完整 CLI 墙钟耗时的中位数 / P95。10,000 与 200,000 文件首次 run 的
+60/80 ms、150/200 ms 目标均通过，10 文件 diff 的 20 ms 与 200 ms 中位数目标也通过。
+真实 300 步会话在第 151、268 步自动压缩后继续完成。
 
 完整统计、Fixture、机器信息、口径和复跑命令见
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md)。首次 run 的 P95 实测为 10,000 文件
-47.235 ms、200,000 文件 166.94 ms。P99 尚未单独测量。
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md)。P99 尚未单独测量。
 
 ## 状态与路线图
 
@@ -234,7 +257,7 @@ commit 或 discard 后的 session 会保留用于审计。`cowbox sessions` 可�
 | --- | --- | --- |
 | **M1** | Linux/WSL2 CLI、快照 DAG、OverlayFS、Landlock、commit journal、测试、基准 | 预览可用 |
 | **M1.5** | Windows 启动器、`setup`、多 harness skill 安装、项目规则与策略 | 预览可用 |
-| **M2** | 网络策略（seccomp 或更新 Landlock）、缓存 bind mount、20 万文件基准、blocked-writes 审计 | 进行中 |
+| **M2** | 长会话、只读宿主缓存、性能优化、20 万文件基准 | 预览可用；网络策略仍在计划中 |
 | **M3** | MCP 代理（`cowbox_diff` / `cowbox_rollback` / `cowbox_commit`） | 计划中 |
 | **M4** | Windows 原生 ReFS + Job Object 后端、macOS 后端、Eval 套件与公开榜单 | 计划中 |
 

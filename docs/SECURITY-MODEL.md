@@ -23,6 +23,7 @@ way to inspect and undo them.
 | Sandbox process tree vs. host processes | PID namespace + PID 1 supervisor | Strong for ordinary children |
 | Command filesystem view vs. host mutations | OverlayFS mount namespace | Strong while the host is not edited |
 | Command environment vs. host environment | env sanitization + redirected HOME/TMPDIR/cache | Best effort; explicit allowlists matter |
+| Host cache data vs. session cache writes | read-only OverlayFS lower + session upper | Strong for configured data directories |
 | Network | none | **Not isolated** |
 | Kernel | none | Out of scope for M1 |
 | Host commit vs. partial writes | journal + backups + atomic renames | Strong for ordinary files |
@@ -35,6 +36,8 @@ command:
 - Read/execute: Linux system trees (`/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`,
   `/etc`, `/proc`, `/sys`, `/run`, `/opt`, `/snap` where present).
 - Read/write: the overlay merged workspace, session `home`, `tmp`, and `cache`.
+- Read-only: configured Cargo `registry/`/`git/`, npm `_cacache/`, and pip cache
+  data directories, each mounted below the session cache.
 - Read/write: a small allowlist of device files such as `/dev/null`,
   `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`, `/dev/tty`, and
   `/dev/pts`.
@@ -55,7 +58,28 @@ without the fence.
 - `WSL_INTEROP`, `WSLENV`, dynamic-loader variables, shell startup hooks, and
   Python/Node injection variables are cleared by default.
 
-## 6. Commit safety
+## 6. Host cache controls
+
+Host cache reuse is opt-in per tool in `.cowbox.toml`. cowbox limits each mount
+to the tool's cache data, never the whole home or tool configuration:
+
+- Cargo: `registry/` and `git/` under the selected `CARGO_HOME`.
+- npm: `_cacache/` under the selected npm cache root.
+- pip: the selected pip cache root; an optional `wheelhouse/` is exposed through
+  `PIP_FIND_LINKS`.
+
+Each source is a read-only OverlayFS lower layer. The writable upper and work
+directories live under the session state root, so index refreshes, downloads,
+and extracted cache entries copy up into session-owned storage. Landlock grants
+the underlying source paths read-only access. Credentials and configuration
+files such as `credentials.toml`, `.npmrc`, and pip config are not mounted and
+remain outside the redirected session home.
+
+The host cache is a trusted local data source. A malicious cache entry can
+influence the tool just as a normal host cache could; cowbox verifies package
+hashes only when the underlying tool is asked to do so.
+
+## 7. Commit safety
 
 The base lowerdir is the live host workspace. cowbox therefore treats the host
 as read-only during a session:
@@ -101,7 +125,7 @@ a whole may still require manual inspection. The journal is fsynced, but the
 recovery contract covers process interruption only. It is not a power-loss,
 kernel-crash, or storage-failure guarantee.
 
-## 7. Known gaps
+## 8. Known gaps
 
 1. **Network access is unrestricted.** A command can connect out, bind host
    ports, or exfiltrate files it is allowed to read. M2 adds a network policy.
@@ -116,7 +140,7 @@ kernel-crash, or storage-failure guarantee.
 6. **No network audit counts.** Landlock denials are silent; `stats` reports
    blocked writes as not instrumented.
 
-## 8. Reporting
+## 9. Reporting
 
 Use GitHub private vulnerability reporting on this repository. Do not disclose
 details in a public issue. Include the cowbox version, kernel, filesystem,

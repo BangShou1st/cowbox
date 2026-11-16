@@ -1,5 +1,6 @@
 use crate::agent::config::{WslConfig, load_global};
 use crate::cli::{CliCommand, DoctorArgs, PathArgs};
+use crate::doctor::HostCacheReport;
 use crate::error::{CliError, CliResult};
 use crate::json;
 use crate::render;
@@ -145,6 +146,7 @@ pub fn doctor(args: &DoctorArgs) -> CliResult<i32> {
                 render::print_doctor(
                     &report.capabilities,
                     report.state_root.as_deref().unwrap_or(Path::new("unknown")),
+                    &report.host_caches,
                     report.ready,
                 );
             }
@@ -194,6 +196,8 @@ struct DoctorReport {
     capabilities: Capabilities,
     #[serde(default)]
     state_root: Option<PathBuf>,
+    #[serde(default)]
+    host_caches: Vec<HostCacheReport>,
 }
 
 #[derive(Debug)]
@@ -236,10 +240,18 @@ fn parse_doctor_response(bytes: &[u8]) -> Result<DoctorResponse, String> {
                 .map(serde_json::from_value)
                 .transpose()
                 .map_err(|error| format!("invalid data.state_root ({error})"))?;
+            let host_caches = data
+                .get("host_caches")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| format!("invalid data.host_caches ({error})"))?
+                .unwrap_or_default();
             Ok(DoctorResponse::Report(DoctorReport {
                 ready,
                 capabilities,
                 state_root,
+                host_caches,
             }))
         }
         Some(false) => {
