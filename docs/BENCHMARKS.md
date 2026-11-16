@@ -1411,7 +1411,9 @@ It performed write (`WRONG`) at step 1, read at step 2, diff, rollback to 0,
 write (`RIGHT`) at step 3, diff, and commit preview. A real PTY confirmation
 committed step 3; the host file contained exactly `RIGHT\n` and the session
 status was `committed`. The raw JSON is
-`/home/bangshou/cowbox-bench-results/m3-claude-agent.json`.
+`/home/bangshou/cowbox-bench-results/m3-claude-agent-release.json`; the
+Claude JSONL stream is stored beside it as
+`m3-claude-agent-release.json.claude.jsonl`.
 
 A Windows `cowbox.exe` build also held one MCP stdio session across discovery,
 write/read, diff, rollback, retry, and commit preview through
