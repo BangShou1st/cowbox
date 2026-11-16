@@ -868,6 +868,40 @@ Raw artifacts are in
 | `criterion.log` | `da601be23389573068631dfdd2731dfea4a20f673f5f437f5fff747f79cd9880` |
 | `criterion-rerun.log` | `d73997c35fb2b652c92ffe1b97f239f5d135fabbb25b0519b50f26eb71281553` |
 
+### Unreadable-file hardening
+
+Candidate commit `62e08524cf6c71aef101eef6549a8cfd6827e26e` added durable
+permission journaling for `000` files and directories. Its rebuilt Linux binary
+SHA-256 was
+`a773bc1dda8cc7117bfccd225963f2db9e58efc088837b7037088505a59360b2`.
+
+A dedicated real-CLI session created a `000` file with a `user.*` xattr in step
+1 and then ran to step 300. Compaction occurred at steps 151 and 268. The final
+session had 301 logical steps, 68 mounted layers, two compacted layers, and
+16,384 reported compact bytes. Both compiled layers and the original step upper
+retained mode `000`; execution inside the sandbox verified the original content
+and xattr. The permission-restoration journal was also exercised after an
+interrupted compaction and restored the source mode before retry.
+
+The 10,000-entry compaction scaling check still completed in 489.094 ms in the
+fixed build, versus the pre-range-scan measurement of 17,544.558 ms.
+
+Final Criterion values from the lower-load rerun:
+
+| Benchmark | Measured |
+| --- | --- |
+| `diff_scan/10000_files_10_changes` | 3.9753 / **4.0430** / 4.1302 ms |
+| `rollback_dag/100_steps` | 11.061 / **11.184** / 11.363 ns |
+| `run_true/10000_files_end_to_end` | 28.602 / **33.001** / 38.586 ms |
+
+`run_true` reported no statistically significant change (`p=0.89`).
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Candidate binary | `a773bc1dda8cc7117bfccd225963f2db9e58efc088837b7037088505a59360b2` |
+| `criterion.log` | `4506d2cc7fd824ccd49d733e518cc7287dedde33a6cdec64dd1cd0f3d9f921dc` |
+| `criterion-rerun.log` | `93629366a87c138a234344b69cb7007d5495152b018840602fb75ea933602d29` |
+
 ## How to run
 
 ```bash
