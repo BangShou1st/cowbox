@@ -1,5 +1,53 @@
 # Release verification
 
+## v0.5.0-m2 offline execution preview
+
+- Tag: `v0.5.0-m2`
+- Release commit: `b67b83891f1e211c97922b2a920bb6d241833490`
+- Release workflow: https://github.com/BangShou1st/cowbox/actions/runs/43823021342
+- Release: https://github.com/BangShou1st/cowbox/releases/tag/v0.5.0-m2
+- Type: GitHub pre-release
+
+Published archive hashes:
+
+| Asset | SHA-256 |
+| --- | --- |
+| `cowbox-v0.5.0-m2-x86_64-unknown-linux-gnu.tar.gz` | `7a6e9739e88d883a2d07e9bafa762129e8a7a2a5111f7c3db9e749e1bd1731f3` |
+| `cowbox-v0.5.0-m2-x86_64-pc-windows-msvc.zip` | `a7e595139928565807a301c80e04aaa1d21e7f8d737c159419e13b32dd41de5b` |
+
+Downloaded assets were re-hashed and matched their published `.sha256` files.
+
+Extracted binary hashes:
+
+| Binary | SHA-256 |
+| --- | --- |
+| Linux `cowbox` | `a11a80201a5e23696a899f1b4cc9898183d9791a49ce0e15f1236b5197ec416a` |
+| Windows `cowbox.exe` | `a7efa5b937e1360148c52ad9f8a9ef46345a0c5f102cc32b69eb361463416c54` |
+
+Acceptance used only the downloaded release assets:
+
+1. The Linux archive was extracted under `/tmp` on ext4. `--version` reported
+   `cowbox 0.5.0-m2`. `doctor --check-run --network off --json` reported
+   `ready=true`, `command_started=true`, and true state-disk, user-namespace,
+   network-namespace, OverlayFS, and Landlock stages. `demo --offline --json`
+   completed with `host_unchanged=true`.
+2. A separate Linux workspace completed a real `run --network off`, produced
+   the expected one-file `diff`, left the file absent on the host, and
+   discarded with `--purge`. The standalone Cargo/npm/pip offline workflow
+   passed with all cold misses, warm hits, session-cache persistence, and host
+   cache hash checks.
+3. The Windows ZIP was extracted and its `cowbox.exe` ran
+   `setup --json --force`. Setup installed version `0.5.0-m2`, and the installed
+   Windows and WSL binaries matched the extracted hashes above.
+4. Through the real `cowbox.exe -> wsl.exe -> Linux cowbox` path, a separate
+   Windows project passed `doctor --check-run --network off`, `demo --offline`,
+   an offline `run`, and `diff`. The sandbox-only file existed in the diff but
+   not on the Windows host. A second command exited 7 and the Windows launcher
+   returned 7. `discard --yes --purge` left the host fixture at its original
+   `.git` directory and `base.txt`.
+
+No release asset was rebuilt or modified during acceptance.
+
 ## v0.4.0-m2 performance preview
 
 - Tag: `v0.4.0-m2`

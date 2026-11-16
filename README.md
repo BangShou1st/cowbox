@@ -351,6 +351,7 @@ methodology live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 The final M2 offline-execution round compared the merge baseline `29af7e7` with
 the network-policy/offline candidate `fb4dad0` on WSL2 ext4. Each scenario used
 20 samples, one excluded warm-up, and a fresh session for every sample.
+This code is shipped in the `v0.5.0-m2` preview.
 
 | Scenario | 10,000 files | 200,000 files |
 | --- | ---: | ---: |

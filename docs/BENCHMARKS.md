@@ -1234,8 +1234,16 @@ Raw artifacts are in
 | `baseline-29af7e7.md` | `3f857ac4f68e659a9709c4321f3076f05035ac8d624b2fc09e6f5c0a08000f9d` |
 | `candidate.json` | `fa7dc0a4f4c402514ad97eb203bae89c7a02e8180996dd2d889397f913ac7cab` |
 | `candidate.md` | `779108594a7ca0d1d9cb96586d8c311487b4fda0f0bf6cd19225650bfed31d32` |
-| `acceptance.json` | `5e27a1a6cb5fc10a38e9736f4db8fcee115d8f20f812a572149d4347a6433e48` |
+| `acceptance-73de186.json` | `9c6f644260e5a81aa1271030683024396a6f58cc5cd2bdf3cac4cadf28a49774` |
 | `criterion/criterion.log` | `5633f987734e2854ccf4f776a1ad60fec309224704467d6fd16ddccdf50a7a8b` |
+
+The local release binary rebuilt at `73de186` retained the measured SHA-256
+`5fcd485054b69cfa4eefb7f645b9cc27e7b1698066f813ba991c971b73cfa648`.
+GitHub's release runner produced a different platform build for tag
+`v0.5.0-m2`; its extracted Linux binary SHA-256 was
+`a11a80201a5e23696a899f1b4cc9898183d9791a49ce0e15f1236b5197ec416a`.
+The performance table identifies the locally measured binary, and the published
+asset acceptance is recorded in [RELEASES.md](RELEASES.md).
 
 ## How to run
 

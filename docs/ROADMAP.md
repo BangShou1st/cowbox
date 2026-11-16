@@ -44,9 +44,9 @@ Status: preview released in `0.3.0-m1`.
 
 ## M2: stronger containment and scale
 
-Status: `0.5.0-m2` is the release candidate for this round. It includes
-long-session layer compaction, network-namespace isolation, active diagnostics,
-offline cache workflows, read-only host cache reuse, and the regression round.
+Status: preview `0.5.0-m2` is published. It includes long-session layer
+compaction, network-namespace isolation, active diagnostics, offline cache
+workflows, read-only host cache reuse, and the regression round.
 
 - [x] `run --network host|off` with CLI, project, and default precedence.
   `off` creates a private Linux network namespace after UID/GID mapping and

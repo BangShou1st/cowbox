@@ -33,10 +33,10 @@ path.
 
 Risk triggers include destructive shell commands, local file-backed database
 migrations, dependency upgrades, refactors over five files, and stateful tests.
-Read-only commands do not use cowbox. cowbox does not isolate the network or
-reverse remote database/service changes unless the caller explicitly selects
-`run --network off`, which isolates IP connectivity but not filesystem-backed
-Unix sockets. Do not present cowbox as a malware sandbox.
+Read-only commands do not use cowbox. The default network policy is `host`; a
+caller can select `run --network off` to isolate IP connectivity without
+isolating filesystem-backed Unix sockets. cowbox does not reverse remote
+database or service changes. Do not present it as a malware sandbox.
 
 `cowbox commit` requires explicit human approval. Agents use
 `cowbox commit --yes` only after receiving that approval; non-interactive calls
