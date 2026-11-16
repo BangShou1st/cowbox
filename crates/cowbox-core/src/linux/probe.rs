@@ -1,6 +1,6 @@
 use crate::error::Result;
 use crate::model::{Capabilities, WhiteoutKind};
-use landlock::{ABI, Access, AccessFs, Ruleset, RulesetAttr};
+use landlock::{ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -28,7 +28,18 @@ pub fn probe(state_root: &Path) -> Result<Capabilities> {
         notes.push("kernel is older than 5.11; userxattr OverlayFS is unavailable".to_string());
     }
     if landlock_abi.unwrap_or(0) < 3 {
-        notes.push("Landlock ABI 3 is required; path fencing may be unavailable".to_string());
+        let detected = landlock_abi
+            .map(|abi| format!("detected Landlock ABI {abi}"))
+            .unwrap_or_else(|| "no Landlock ABI detected".to_string());
+        notes.push(format!(
+            "{detected}; cowbox requires Landlock ABI 3 or newer for path fencing"
+        ));
+    }
+    if state_fs.as_deref() == Some("9p") {
+        notes.push(format!(
+            "state root {} is on 9p, which cannot hold OverlayFS upper/work layers; set COWBOX_HOME to a directory on an xattr-capable Linux filesystem, for example in WSL2: export COWBOX_HOME=\"$HOME/.local/state/cowbox\" (WSL ext4)",
+            state_root.display()
+        ));
     }
     notes.push("network isolation is not implemented in M1".to_string());
     notes.push("whiteout kind is confirmed by the first real run".to_string());
@@ -58,14 +69,21 @@ fn user_namespaces_available() -> bool {
     clone_setting.unwrap_or(true) && max_namespaces.unwrap_or(true)
 }
 
+/// Returns the highest ABI in the V1-V3 range that can create a ruleset with
+/// hard compatibility. Values above V3 are reported as V3.
 fn detect_landlock() -> Option<i32> {
     for (abi, number) in [(ABI::V3, 3), (ABI::V2, 2), (ABI::V1, 1)] {
-        if Ruleset::default()
+        let Ok(ruleset) = Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
             .handle_access(AccessFs::from_all(abi))
-            .is_ok()
-        {
-            return Some(number);
-        }
+        else {
+            continue;
+        };
+        let Ok(created) = ruleset.create() else {
+            continue;
+        };
+        drop(created);
+        return Some(number);
     }
     None
 }

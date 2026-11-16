@@ -455,6 +455,68 @@ COWBOX_REQUIRE_SANDBOX=1 cargo test -p cowbox-cli --test adversarial_suite -- --
 bash scripts/smoke.sh
 ```
 
+## Doctor diagnostics verification
+
+This round changes only capability probing and diagnostic state handling. It
+does not change namespace, OverlayFS, Landlock enforcement, or command
+execution. Verification used WSL2 kernel `6.6.87.2-microsoft-standard-WSL2`
+and ext4 on `/dev/sde`.
+
+Landlock detection now sets `CompatLevel::HardRequirement`, requests the file
+access set for ABI 1, 2, or 3, and creates then immediately drops a temporary
+ruleset file descriptor without calling `restrict_self`. ABI 2 adds `Refer`
+and ABI 3 adds `Truncate` in the landlock 0.4.7 access model. The existing
+`landlock_abi` field therefore means the highest ABI in the V1-V3 probe range
+that can create a ruleset. A newer kernel is still reported as ABI 3. `doctor`
+requires ABI 3 or newer for readiness.
+
+The `doctor` command walks the configured state path without creating it.
+Existing symlinks are canonicalized before the workspace overlap check; a
+dangling or cyclic symlink returns a structured `STATE_ROOT` error. Relative
+paths and `..` components are resolved even when an intermediate directory does
+not exist. Observed filesystem and path behavior:
+
+| Scenario | Result |
+| --- | --- |
+| Missing state path below ext4 | `ready=true`, `state_fs=ext4`, ABI 3; state path not created |
+| Missing relative path containing `..` | resolves the prospective path; no missing directory created |
+| Resolvable state symlink | canonical target is used; ready when the target passes checks |
+| Dangling state symlink | structured `STATE_ROOT` error, exit 2; target not created |
+| State symlink into workspace | structured `STATE_ROOT` error, exit 2; no state layout created |
+| 9p workspace with ext4 state | `ready=true`, `state_fs=ext4`; state path not created |
+| Dedicated 9p state path | `ready=false`, exit 1, actionable xattr-capable `COWBOX_HOME` note; state path not created |
+| State path inside workspace | structured `STATE_ROOT` error, exit 2; state path not created |
+| Synthetic Landlock capability `None`, ABI 1, ABI 2 | not ready |
+| Synthetic Landlock capability ABI 3 | ready when other capabilities pass |
+
+The complete verification exited 0:
+
+| Check | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | passed |
+| workspace Clippy with `-D warnings` | passed |
+| `cargo test --workspace` | 92 passed |
+| forced-sandbox `adversarial_suite` | 26 passed, 0 ignored |
+| `bash scripts/smoke.sh` | passed |
+
+Criterion was run for the initial engine-probe round, before the follow-up
+path-resolver correction. That correction only affects `doctor` path
+resolution and is not exercised by benchmark targets, so no performance
+sampling was repeated while the exec-step investigation was active. Values are
+the reported lower / estimate / upper interval:
+
+| Benchmark | Samples | Measured |
+| --- | ---: | --- |
+| `diff_scan/10000_files_10_changes` | 20 | 3.8420 / **3.8597** / 3.8801 ms |
+| `rollback_dag/100_steps` | 20 | 10.382 / **10.482** / 10.594 ns |
+| `run_true/10000_files_end_to_end` | 10 | 51.180 / **55.917** / 60.895 ms |
+
+Criterion reported no statistically significant change for `diff_scan`,
+`rollback_dag`, or `run_true`. The `run_true` interval showed host variance and
+is reported without a regression or improvement claim. The final fixed release
+binary used for the path scenarios had SHA-256
+`736367338b2003b9b7f4dcf32be1a8aa9ee2b5c2dfbf7bd21d384e91e5c14ced`.
+
 ## How to run
 
 ```bash

@@ -5,6 +5,8 @@ mod cli;
 mod commands;
 mod config;
 mod demo;
+#[cfg(not(windows))]
+mod doctor;
 mod error;
 mod json;
 mod render;

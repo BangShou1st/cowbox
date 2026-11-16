@@ -49,6 +49,8 @@ pub struct Capabilities {
     pub user_namespace: bool,
     pub overlayfs: bool,
     pub userxattr: bool,
+    /// Highest Landlock ABI in cowbox's V1-V3 probe range that can create a
+    /// ruleset under the crate's hard compatibility requirement.
     pub landlock_abi: Option<i32>,
     pub whiteout_kind: WhiteoutKind,
     pub state_fs: Option<String>,

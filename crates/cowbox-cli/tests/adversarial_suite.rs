@@ -293,11 +293,13 @@ fn doctor_reports_linux_sandbox_capabilities() {
     assert_ok(&value, "doctor");
     assert_eq!(value["data"]["ready"].as_bool(), Some(true));
     assert_eq!(value["data"]["capabilities"]["os"].as_str(), Some("linux"));
-    assert!(
-        value["data"]["capabilities"]["landlock_abi"]
-            .as_i64()
-            .unwrap_or(0)
-            >= 3
+    assert_eq!(
+        value["data"]["capabilities"]["landlock_abi"].as_i64(),
+        Some(3)
+    );
+    assert_eq!(
+        value["data"]["capabilities"]["state_fs"].as_str(),
+        Some("ext4")
     );
 }
 
