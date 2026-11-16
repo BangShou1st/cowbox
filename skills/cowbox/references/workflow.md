@@ -20,9 +20,9 @@ cowbox commit --dry-run
 cowbox commit --yes
 ```
 
-Use `cowbox discard --yes` to throw the session away. M1 supports up to 150
-layers per session; commit or discard and start a new session when the limit is
-reached.
+Use `cowbox discard --yes` to throw the session away. Long sessions compact
+older physical mount layers automatically at the OverlayFS limit while keeping
+the logical step DAG available for diff, commit, rollback, and branching.
 
 cowbox does not isolate the network or reverse remote database/service changes.
 It only protects the local workspace file tree.

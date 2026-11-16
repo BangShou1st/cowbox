@@ -209,7 +209,7 @@ lowerdir 挂载，索引刷新、新下载和解包写入会话自己的 upper �
 
 ## 安全模型
 
-- M1 使用 **Landlock ABI 3** 做路径级读写围栏，使用 **PID namespace** 与 PID 1
+- cowbox 使用 **Landlock ABI 3** 做路径级读写围栏，使用 **PID namespace** 与 PID 1
   supervisor 做进程树回收。
 - 活跃 session 期间，宿主机 workspace 视为**只读**。lowerdir 是实时目录，因此
   commit 通过 base manifest 检测外部修改；默认拒绝，`--force` 也会先备份。
@@ -235,21 +235,21 @@ lowerdir 挂载，索引刷新、新下载和解包写入会话自己的 upper �
 
 只发布真实机器上测出的数字。测试方法与脚本见 [docs/BENCHMARKS.md](docs/BENCHMARKS.md)。
 
-已完成的 M2 对比轮在 WSL2 ext4 上比较 `v0.3.0-m1` 发布基线与优化候选，每个
-场景使用 20 个样本、1 个不计入统计的预热样本，并且每个样本都使用全新会话。
+最终 M2 回归轮在 WSL2 ext4 上比较已发布的 `v0.4.0-m2` 二进制与长会话/缓存候选，
+每个场景使用 20 个样本、1 个不计入统计的预热样本，并且每个样本都使用全新会话。
 
 | 场景 | 10,000 文件 | 200,000 文件 |
 | --- | ---: | ---: |
-| 首次 `cowbox run -- true`（含清单采集） | 43.29 ms | 163.14 ms |
-| 固定 1 个父层的后续 run | 38.43 ms | 38.55 ms |
-| 10 个文件变更的 `cowbox diff` | 24.71 ms | 388.55 ms |
+| 首次 `cowbox run -- true`（含清单采集） | 40.40 / 46.98 ms | 119.05 / 130.97 ms |
+| 固定 1 个父层的后续 run | 30.81 / 35.28 ms | 28.60 / 31.53 ms |
+| 10 个文件变更的 `cowbox diff` | 14.17 / 17.00 ms | 91.69 / 103.25 ms |
 
-表中是完整 CLI 墙钟耗时的中位数。当前层限制接受“150 个父层再执行一步”，随后
-下一步返回 `CONFIG_ERROR`。
+表中是完整 CLI 墙钟耗时的中位数 / P95。10,000 与 200,000 文件首次 run 的
+60/80 ms、150/200 ms 目标均通过，10 文件 diff 的 20 ms 与 200 ms 中位数目标也通过。
+真实 300 步会话在第 151、268 步自动压缩后继续完成。
 
 完整统计、Fixture、机器信息、口径和复跑命令见
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md)。首次 run 的 P95 实测为 10,000 文件
-47.235 ms、200,000 文件 166.94 ms。P99 尚未单独测量。
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md)。P99 尚未单独测量。
 
 ## 状态与路线图
 

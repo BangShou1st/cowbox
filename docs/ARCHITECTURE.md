@@ -301,7 +301,7 @@ whiteout kind is confirmed by the first real run, and latency is measured by
 compacted storage, rollback count, reaped orphans, incremental disk use, and
 whether network isolation is active.
 
-M1 does **not** count blocked writes: Landlock denials are silent. The field is
+cowbox does **not** count blocked writes: Landlock denials are silent. The field is
 reported as not instrumented rather than invented.
 
 ## 9. WSL2 bridge notes

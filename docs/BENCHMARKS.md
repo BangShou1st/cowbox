@@ -643,6 +643,123 @@ printing every failed check and the migration note, and `doctor --json` retained
 missing WSL distribution produced `WSL_START_FAILED` with exit 1 instead of a
 capability diagnostic.
 
+## M2 long-session and cache regression round
+
+This round used the published `v0.4.0-m2` Linux binary
+`2a8b38b3f7aab1100fd6f1ada8a0ebd4c62236522c918ce868cf8f8d2b7caa29`
+as the fixed baseline and the source at
+`ce285ad613fa82e98237868074107b3b3e293f58` as the candidate. The candidate
+binary SHA-256 was
+`21e05c96bba3f3df027382e8e55045640a02817ebde95e0d6a1b903ad43b19db`.
+
+All measurements used the same WSL2 instance, ext4 benchmark/state filesystems,
+release profile, serial execution, 20 samples, and one excluded warm-up per
+scenario. No sample was removed or winsorized.
+
+The full-harness baseline run started at load average
+`0.841, 0.323, 0.127` and ended at `1.121, 0.438, 0.172`; the candidate run
+started at `1.121, 0.438, 0.172` and ended at `1.458, 0.596, 0.236`. The paired
+run started at `1.134, 0.566, 0.231` and ended at `1.671, 0.705, 0.282`.
+Machine details are unchanged from the profile above.
+
+### Full harness
+
+Cells are median / P95 milliseconds.
+
+| Scenario | Files | `v0.4.0-m2` baseline | Candidate |
+| --- | ---: | ---: | ---: |
+| First run | 10,000 | 35.58 / 39.54 | **40.40 / 46.98** |
+| One parent layer | 10,000 | 30.98 / 36.51 | **30.81 / 35.28** |
+| 10-file diff | 10,000 | 13.38 / 17.22 | **14.17 / 17.00** |
+| First run | 200,000 | 126.61 / 160.61 | **119.05 / 130.97** |
+| One parent layer | 200,000 | 28.58 / 52.26 | **28.60 / 31.53** |
+| 10-file diff | 200,000 | 93.25 / 103.26 | **91.69 / 103.25** |
+
+The fixed one-parent candidate step measured 31.91 / 41.65 ms after a 40.22 ms
+untimed preparation step. The two first-run limits pass:
+10,000 files at 40.40 / 46.98 ms against 60 / 80 ms, and 200,000 files at
+119.05 / 130.97 ms against 150 / 200 ms. The 10-file diff also passes:
+14.17 ms at 10,000 files against 20 ms, and 91.69 ms at 200,000 files against
+200 ms.
+
+### Paired first-run A/B
+
+The paired run alternated baseline/candidate order, used a shared fixture per
+file count, 20 measured pairs, and one warm-up pair. Paired delta is candidate
+minus baseline.
+
+| Files | Baseline median / P95 | Candidate median / P95 | Paired delta |
+| ---: | ---: | ---: | ---: |
+| 10,000 | 42.52 / 47.01 ms | **42.42 / 44.99 ms** | -0.91 / +3.81 ms |
+| 200,000 | 125.83 / 140.72 ms | **128.51 / 135.40 ms** | +1.99 / +11.17 ms |
+
+The deltas are small relative to host variance and remain well inside the
+required limits.
+
+### Long session and compaction boundary
+
+The candidate completed 300 measured steps with a 100-file fixture. Baseline
+completed 151 steps, then rejected step 152 with `CONFIG_ERROR`; its rejected
+CLI invocation took 1.58 ms.
+
+| Session segment | Median | P95 |
+| --- | ---: | ---: |
+| Candidate all 300 steps | 41.83 ms | 65.52 ms |
+| Candidate steps 1-151 | 39.36 ms | 66.30 ms |
+| Candidate steps 152-300 | 45.47 ms | 64.41 ms |
+
+Compaction ran at steps 151 and 268:
+
+| Compaction | Step elapsed | Physical layers after | Stored compact layers | Reported compact bytes |
+| ---: | ---: | ---: | ---: | ---: |
+| 151 | 65.22 ms | 35 | 1 | 4,096 |
+| 268 | 50.79 ms | 35 | 2 | 8,192 |
+
+Disk checkpoints include both logical step directories and compacted artifacts:
+
+| Step | Logical disk bytes | Allocated bytes | Mounted layers | Compact layers |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 1,577 | 81,920 | 2 | 0 |
+| 150 | 568,035 | 4,030,464 | 151 | 0 |
+| 151 | 571,800 | 4,079,616 | 35 | 1 |
+| 200 | 737,763 | 5,308,416 | 84 | 1 |
+| 267 | 1,085,158 | 7,241,728 | 151 | 1 |
+| 268 | 1,089,976 | 7,278,592 | 35 | 2 |
+| 300 | 1,189,928 | 8,077,312 | 67 | 2 |
+
+From step 151 to 300, logical session storage grew by 618,128 bytes and
+allocated storage by 3,997,696 bytes. The two compacted layers account for
+8,192 reported bytes; the retained logical step directories remain available
+for diff, commit, rollback, and branching.
+
+### Criterion
+
+The required Criterion targets were rerun with
+`COWBOX_BENCH_FILES=10000` and 20 samples. Values are lower / estimate / upper.
+
+| Benchmark | Measured |
+| --- | --- |
+| `diff_scan/10000_files_10_changes` | 3.9979 / **4.1281** / 4.2240 ms |
+| `rollback_dag/100_steps` | 10.260 / **10.456** / 10.763 ns |
+| `run_true/10000_files_end_to_end` | 33.449 / **35.739** / 38.016 ms |
+
+`diff_scan` reported no change (`p=0.25`). `rollback_dag` reported a 3.15%
+change, which Criterion classified as within its noise threshold. `run_true`
+reported no change against the previous stored run (`p=0.77`). The 20-sample
+CLI harness above remains the authoritative end-to-end comparison.
+
+Raw artifacts are in
+`/home/bangshou/cowbox-bench-results/m2-final2-20261116T031019Z/`:
+`baseline.json`, `candidate.json`, `paired-20261116T0313Z.json`, and
+`criterion.log`.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `baseline.json` | `b08d80918e3bcefbd47682c414db065875ede58f45f82d396d3ddbca286e48f6` |
+| `candidate.json` | `2b66119a14362e2eab994467de04b24a89edc3cd7dd364780645bcb317216f36` |
+| `paired-20261116T0313Z.json` | `85b7e88c021d476a0d0dcaaedd21ce5630575d63f626978c5cf6db8ccc25f262` |
+| `criterion.log` | `cac68eb8cacd5a4b771895ad37dbb4e2aeaf2d1bb58d124c7915c48098ee37ed` |
+
 ## How to run
 
 ```bash
@@ -655,6 +772,8 @@ bash scripts/bench-m2.sh \
   --warmups 1 \
   --file-counts 10000 200000 \
   --depths 1 \
+  --long-session-steps 300 \
+  --long-session-file-count 100 \
   --json-output "$HOME/cowbox-bench-results/cowbox-m2-diff-rerun-$stamp.json" \
   --markdown-output "$HOME/cowbox-bench-results/cowbox-m2-diff-rerun-$stamp.md"
 ```

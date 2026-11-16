@@ -43,6 +43,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         help="layer depths for the full single-binary protocol",
     )
+    parser.add_argument(
+        "--long-session-steps",
+        type=int,
+        default=300,
+        help="steps for the compaction-boundary run; 0 disables it",
+    )
+    parser.add_argument(
+        "--long-session-file-count",
+        type=int,
+        default=100,
+        help="files in the long-session fixture",
+    )
     parser.add_argument("--samples", type=int, default=20)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=int, default=600)
@@ -68,8 +80,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--depths values must be at least 1")
     if 150 in args.depths:
         parser.error(
-            "--depths 150 is not a valid timed sample; use 149 and let the limit probe test 150"
+            "--depths 150 is not a valid timed sample; use 149 and let the long-session probe cross 150"
         )
+    if args.long_session_steps != 0 and args.long_session_steps < 152:
+        parser.error("--long-session-steps must be 0 or at least 152")
+    if args.long_session_file_count < 100:
+        parser.error("--long-session-file-count must be at least 100")
     return args
 
 
@@ -469,6 +485,16 @@ def benchmark_paired_first_run(
             bench_root / "fixtures", files, candidate_binary, timeout
         )
         with SampleState(
+            bench_root / "setup-states", f"baseline-config-{files}", 0
+        ) as state:
+            invoke_json(
+                baseline_binary,
+                workspace,
+                state,
+                ["init", "--force", "--json"],
+                timeout,
+            )
+        with SampleState(
             bench_root / "setup-states", f"baseline-preflight-{files}", 0
         ) as state:
             verify_preflight(baseline_binary, workspace, state, timeout)
@@ -762,72 +788,145 @@ def benchmark_depths(
     return results
 
 
-def probe_layer_limit(
+def allocated_tree_bytes(path: Path) -> int:
+    total = 0
+    seen: set[tuple[int, int]] = set()
+    for root, directories, files in os.walk(path, followlinks=False):
+        for name in [*directories, *files]:
+            candidate = Path(root) / name
+            try:
+                metadata = candidate.lstat()
+            except OSError:
+                continue
+            if candidate.is_symlink():
+                continue
+            identity = (metadata.st_dev, metadata.st_ino)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            total += metadata.st_blocks * 512
+    return total
+
+
+def probe_long_session(
     binary: Path,
     workspace: Path,
     state_base: Path,
+    steps: int,
     timeout: int,
 ) -> dict[str, Any]:
-    print("[limit] preparing 150 active layers", flush=True)
+    print(
+        f"[long-session] running {steps} steps through the 150-layer boundary",
+        flush=True,
+    )
     state_base.mkdir(parents=True)
-    with SampleState(state_base, "limit", 0) as state:
-        for expected_step in range(1, 151):
-            _elapsed, envelope, _process = invoke_json(
-                binary, workspace, state, ["run", "--json", "--", "true"], timeout
+    checkpoints = {1, 150, 151, 152, 200, 267, 268, 269, steps}
+    samples: list[float] = []
+    checkpoint_rows: list[dict[str, Any]] = []
+    compaction_events: list[dict[str, Any]] = []
+    rejection: dict[str, Any] | None = None
+    session_id: str | None = None
+    compacted_count = 0
+    with SampleState(state_base, "long-session", 0) as state:
+        for expected_step in range(1, steps + 1):
+            elapsed, envelope, process = invoke_json(
+                binary,
+                workspace,
+                state,
+                ["run", "--json", "--", "true"],
+                timeout,
+                expect_success=False,
             )
+            if process.returncode != 0 or envelope.get("ok") is not True:
+                error = envelope.get("error", {})
+                if expected_step > 151 and error.get("code") == "CONFIG_ERROR":
+                    rejection = {
+                        "step": expected_step,
+                        "elapsed_ms": round(elapsed, 3),
+                        "exit_code": process.returncode,
+                        "error_code": error.get("code"),
+                        "error_message": error.get("message"),
+                    }
+                    break
+                raise BenchmarkError(
+                    f"long-session step {expected_step} failed: "
+                    f"exit={process.returncode} output={envelope}"
+                )
             actual_step = envelope.get("data", {}).get("step")
             if actual_step != expected_step:
                 raise BenchmarkError(
-                    f"limit setup: expected step {expected_step}, got {actual_step}"
+                    f"long session expected step {expected_step}, got {actual_step}"
                 )
-        success_ms, success, _process = invoke_json(
-            binary, workspace, state, ["run", "--json", "--", "true"], timeout
-        )
-        if success.get("data", {}).get("step") != 151:
-            raise BenchmarkError(
-                f"step from 150 parent layers did not create step 151: {success}"
+            samples.append(elapsed)
+            session = envelope.get("session") or {}
+            session_id = session.get("id", session_id)
+
+            if session_id is not None:
+                compacted_root = (
+                    state / "sessions" / session_id / "layers" / "compacted"
+                )
+                current_count = (
+                    sum(1 for candidate in compacted_root.iterdir() if candidate.is_dir())
+                    if compacted_root.is_dir()
+                    else 0
+                )
+                if current_count > compacted_count:
+                    compacted_count = current_count
+                    _stats_ms, stats, _stats_process = invoke_json(
+                        binary, workspace, state, ["stats", "--json"], timeout
+                    )
+                    data = stats.get("data", {})
+                    compaction_events.append(
+                        {
+                            "step": expected_step,
+                            "elapsed_ms": round(elapsed, 3),
+                            "compact_layers": data.get("compact_layers"),
+                            "mounted_layers": data.get("mounted_layers"),
+                            "compacted_bytes": data.get("compacted_bytes"),
+                        }
+                    )
+
+            if expected_step in checkpoints:
+                _stats_ms, stats, _stats_process = invoke_json(
+                    binary, workspace, state, ["stats", "--json"], timeout
+                )
+                data = stats.get("data", {})
+                session_path = state / "sessions" / str(session_id)
+                checkpoint_rows.append(
+                    {
+                        "step": expected_step,
+                        "elapsed_ms": round(elapsed, 3),
+                        "logical_steps": data.get("logical_steps"),
+                        "mounted_layers": data.get("mounted_layers"),
+                        "compact_layers": data.get("compact_layers"),
+                        "compacted_bytes": data.get("compacted_bytes"),
+                        "session_disk_bytes": data.get("disk_bytes"),
+                        "session_allocated_bytes": allocated_tree_bytes(session_path),
+                    }
+                )
+        final_stats: dict[str, Any] | None = None
+        if session_id is not None:
+            _stats_ms, stats, _stats_process = invoke_json(
+                binary, workspace, state, ["stats", "--json"], timeout
             )
-        rejected_ms, rejected, failed_process = invoke_json(
-            binary,
-            workspace,
-            state,
-            ["run", "--json", "--", "true"],
-            timeout,
-            expect_success=False,
-        )
-        error = rejected.get("error", {})
-        if failed_process.returncode != 2 or rejected.get("ok") is not False:
-            raise BenchmarkError(
-                "step from 151 parent layers did not fail with a JSON error: "
-                f"exit={failed_process.returncode} output={rejected}"
-            )
-        if error.get("code") != "CONFIG_ERROR":
-            raise BenchmarkError(f"unexpected layer-limit error: {rejected}")
-        _log_ms, log, _process = invoke_json(
-            binary, workspace, state, ["log", "--json"], timeout
-        )
-        dag = log.get("data", {}).get("dag", {})
-        session_id = dag.get("session_id")
-        head_step = dag.get("head_step")
-        if head_step != 151 or not isinstance(session_id, str):
-            raise BenchmarkError(f"session head changed after rejected step: {log}")
-        step_152 = state / "sessions" / session_id / "steps" / "152"
-        if step_152.exists():
-            raise BenchmarkError(f"rejected step left state behind: {step_152}")
-        result = {
-            "active_layers_before_success": 150,
-            "success_from_150_parent_layers": {
-                "elapsed_ms": round(success_ms, 3),
-                "head_after_step": 151,
-            },
-            "rejection_from_151_parent_layers": {
-                "elapsed_ms": round(rejected_ms, 3),
-                "exit_code": failed_process.returncode,
-                "error_code": error.get("code"),
-                "error_message": error.get("message"),
-                "head_after_rejection": head_step,
-                "step_152_created": step_152.exists(),
-            },
+            data = stats.get("data", {})
+            session_path = state / "sessions" / session_id
+            final_stats = {
+                **data,
+                "session_allocated_bytes": allocated_tree_bytes(session_path),
+            }
+        first_phase = samples[:151]
+        later_phase = samples[151:]
+        result: dict[str, Any] = {
+            "requested_steps": steps,
+            "completed_steps": len(samples),
+            "compaction_events": compaction_events,
+            "checkpoints": checkpoint_rows,
+            "all_steps": summarize(samples),
+            "steps_1_to_151": summarize(first_phase),
+            "steps_after_151": summarize(later_phase) if later_phase else None,
+            "final_stats": final_stats,
+            "rejection": rejection,
         }
     shutil.rmtree(state_base)
     return result
@@ -925,23 +1024,62 @@ def result_markdown(result: dict[str, Any]) -> str:
             f"| {prep_step['median_ms']:.2f} ms "
             f"| {step['median_ms']:.2f} ms ({step['p95_ms']:.2f} ms) |"
         )
-    limit = result.get("layer_limit")
-    if limit:
-        success = limit["success_from_150_parent_layers"]
-        rejected = limit["rejection_from_151_parent_layers"]
+    long_session = result.get("long_session")
+    if long_session:
         lines.extend(
             [
                 "",
-                "## Layer limit probe",
+                "## Long session / compaction boundary",
                 "",
-                f"- A step with 150 parent layers succeeded in {success['elapsed_ms']:.2f} ms "
-                f"and created head step {success['head_after_step']}.",
-                f"- The next step, with 151 parent layers, exited {rejected['exit_code']} "
-                f"with `{rejected['error_code']}` after {rejected['elapsed_ms']:.2f} ms; "
-                f"head remained {rejected['head_after_rejection']} and step 152 was not created.",
-                f"- Error: `{rejected['error_message']}`",
+                f"- Requested steps: {long_session['requested_steps']}; "
+                f"completed steps: {long_session['completed_steps']}.",
+                f"- All steps: {long_session['all_steps']['median_ms']:.2f} ms median, "
+                f"{long_session['all_steps']['p95_ms']:.2f} ms P95.",
+                f"- Steps 1-151: {long_session['steps_1_to_151']['median_ms']:.2f} ms median, "
+                f"{long_session['steps_1_to_151']['p95_ms']:.2f} ms P95.",
             ]
         )
+        later = long_session.get("steps_after_151")
+        if later:
+            lines.append(
+                f"- Steps 152+: {later['median_ms']:.2f} ms median, "
+                f"{later['p95_ms']:.2f} ms P95."
+            )
+        if long_session["compaction_events"]:
+            lines.extend(
+                [
+                    "",
+                    "| Compaction at step | Step elapsed | Mounted layers | Compact layers | Compacted bytes |",
+                    "| ---: | ---: | ---: | ---: | ---: |",
+                ]
+            )
+            for event in long_session["compaction_events"]:
+                lines.append(
+                    f"| {event['step']} | {event['elapsed_ms']:.2f} ms "
+                    f"| {event['mounted_layers']} | {event['compact_layers']} "
+                    f"| {event['compacted_bytes']} |"
+                )
+        if long_session["checkpoints"]:
+            lines.extend(
+                [
+                    "",
+                    "| Step | Session disk bytes | Allocated bytes | Mounted layers | Compact layers |",
+                    "| ---: | ---: | ---: | ---: | ---: |",
+                ]
+            )
+            for checkpoint in long_session["checkpoints"]:
+                lines.append(
+                    f"| {checkpoint['step']} | {checkpoint['session_disk_bytes']} "
+                    f"| {checkpoint['session_allocated_bytes']} "
+                    f"| {checkpoint['mounted_layers']} "
+                    f"| {checkpoint['compact_layers']} |"
+                )
+        rejected = long_session.get("rejection")
+        if rejected:
+            lines.append(
+                f"- Legacy limit rejection at step {rejected['step']} after "
+                f"{rejected['elapsed_ms']:.2f} ms with `{rejected['error_code']}`."
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -997,6 +1135,8 @@ def main() -> int:
             "warmups": args.warmups,
             "file_counts": args.file_counts,
             "depths": args.depths,
+            "long_session_steps": args.long_session_steps,
+            "long_session_file_count": args.long_session_file_count,
             "require_fs": args.require_fs,
             "timeout_seconds": args.timeout_seconds,
             "clock": "perf_counter around each CLI subprocess; fixture generation and cleanup excluded",
@@ -1063,12 +1203,20 @@ def main() -> int:
                 args.warmups,
                 args.timeout_seconds,
             )
-            result["layer_limit"] = probe_layer_limit(
-                binary,
-                fixture_workspace,
-                bench_root / "sample-states" / "limit",
-                args.timeout_seconds,
-            )
+            if args.long_session_steps:
+                long_workspace, _long_changed = prepare_fixture(
+                    bench_root / "long-fixture",
+                    args.long_session_file_count,
+                    binary,
+                    args.timeout_seconds,
+                )
+                result["long_session"] = probe_long_session(
+                    binary,
+                    long_workspace,
+                    bench_root / "sample-states" / "long-session",
+                    args.long_session_steps,
+                    args.timeout_seconds,
+                )
         result["machine"]["load_average_at_end"] = [
             round(value, 3) for value in os.getloadavg()
         ]

@@ -30,6 +30,10 @@ All notable changes to this project are documented here. The format follows
   `mounted_layers`, `compact_layers`, and `compacted_bytes`.
 - Session disk accounting includes compaction artifacts and host-cache overlay
   storage. Finalized sessions include both in normal `gc` removal.
+- The M2 wall-clock harness now follows a 300-step session across repeated
+  compaction boundaries, records every step, compaction events, mounted-layer
+  counts, and logical/allocated disk growth. The fixed-binary regression round
+  is recorded in `docs/BENCHMARKS.md`.
 
 ## [0.4.0-m2] - 2026-11-16
 

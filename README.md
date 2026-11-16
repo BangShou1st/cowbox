@@ -239,7 +239,7 @@ and land in the session cache.
 
 ## Safety model
 
-- cowbox M1 uses **Landlock ABI 3** for path-based read/write fencing and a
+- cowbox uses **Landlock ABI 3** for path-based read/write fencing and a
   **PID namespace** plus a PID 1 supervisor for process-tree cleanup.
 - The host workspace is treated as **read-only during an active session**. The
   lowerdir is the live workspace, so external edits are detected at commit time
@@ -277,22 +277,23 @@ See [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md) for the full threat model.
 We only publish numbers that were measured on a real machine. The harness and
 methodology live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-The completed M2 round compared the `v0.3.0-m1` release baseline with the
-optimized candidate on WSL2 ext4, using 20 samples per scenario, one excluded
-warm-up, and a fresh session for every sample.
+The final M2 regression round compared the published `v0.4.0-m2` binary with
+the long-session/cache candidate on WSL2 ext4. Each scenario used 20 samples,
+one excluded warm-up, and a fresh session for every sample.
 
 | Scenario | 10,000 files | 200,000 files |
 | --- | ---: | ---: |
-| First `cowbox run -- true` (includes manifest capture) | 43.29 ms | 163.14 ms |
-| Subsequent run with 1 parent layer | 38.43 ms | 38.55 ms |
-| `cowbox diff` with 10 changed files | 24.71 ms | 388.55 ms |
+| First `cowbox run -- true` (includes manifest capture) | 40.40 / 46.98 ms | 119.05 / 130.97 ms |
+| Subsequent run with 1 parent layer | 30.81 / 35.28 ms | 28.60 / 31.53 ms |
+| `cowbox diff` with 10 changed files | 14.17 / 17.00 ms | 91.69 / 103.25 ms |
 
-Values are medians of complete CLI wall-clock durations. A 10,000-file step with
-150 parents is accepted, and the next step is rejected with `CONFIG_ERROR`.
+Cells are median / P95 of complete CLI wall-clock durations. The 10,000-file
+and 200,000-file first-run limits of 60/80 ms and 150/200 ms pass, as do the
+10-file diff medians of 20 ms and 200 ms. A real 300-step session completed
+with automatic compaction at steps 151 and 268.
 
 See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for full statistics, fixtures,
-machine details, caveats, and the exact rerun command. First-run P95 measured
-47.235 ms at 10,000 files and 166.94 ms at 200,000 files. P99 is not separately
+machine details, caveats, and the exact rerun command. P99 is not separately
 instrumented yet.
 
 ## Status and roadmap
