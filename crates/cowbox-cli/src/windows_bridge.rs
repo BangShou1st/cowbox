@@ -19,12 +19,15 @@ pub fn delegate_if_needed(command: &CliCommand) -> Option<CliResult<i32>> {
         | CliCommand::Discard(_)
         | CliCommand::Sessions(_)
         | CliCommand::Gc(_)
-        | CliCommand::Stats(_) => Some(delegate(command)),
-        CliCommand::SandboxExec(_) | CliCommand::Supervisor(_) => Some(Err(CliError::new(
-            "INTERNAL_COMMAND",
-            "internal commands are only valid inside WSL",
-        )
-        .exit(125))),
+        | CliCommand::Stats(_)
+        | CliCommand::McpProxy(_) => Some(delegate(command)),
+        CliCommand::McpAdapter(_) | CliCommand::SandboxExec(_) | CliCommand::Supervisor(_) => {
+            Some(Err(CliError::new(
+                "INTERNAL_COMMAND",
+                "internal commands are only valid inside WSL",
+            )
+            .exit(125)))
+        }
         CliCommand::Init(_)
         | CliCommand::Doctor(_)
         | CliCommand::Setup(_)
@@ -40,7 +43,7 @@ fn delegate(command: &CliCommand) -> CliResult<i32> {
     let config = load_global()?;
     let distro = config.wsl.distro.clone();
     let linux_binary = resolve_linux_binary(&distro, &config.wsl)?;
-    let interactive = needs_terminal(command);
+    let interactive = needs_inherited_stdio(command);
     let cwd = std::env::current_dir()?;
     let cwd_text = cwd.to_string_lossy().to_string();
     let args = std::env::args_os().skip(1).collect::<Vec<OsString>>();
@@ -79,7 +82,10 @@ fn delegate(command: &CliCommand) -> CliResult<i32> {
     Ok(output.status.code().unwrap_or(1))
 }
 
-fn needs_terminal(command: &CliCommand) -> bool {
+fn needs_inherited_stdio(command: &CliCommand) -> bool {
+    if matches!(command, CliCommand::McpProxy(_)) {
+        return true;
+    }
     let prompts = match command {
         CliCommand::Commit(args) => !args.yes && !args.dry_run,
         CliCommand::Gc(args) => !args.yes && !args.dry_run,

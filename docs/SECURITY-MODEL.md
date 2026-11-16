@@ -17,7 +17,7 @@ way to inspect and undo them.
 
 ## 3. Trust boundaries
 
-| Boundary | Mechanism | M2 strength |
+| Boundary | Mechanism | M3 strength |
 | --- | --- | --- |
 | Workspace vs. rest of host | Landlock path rules | Strong for normal file access |
 | Sandbox process tree vs. host processes | PID namespace + PID 1 supervisor | Strong for ordinary children |
@@ -26,8 +26,16 @@ way to inspect and undo them.
 | Host cache data vs. session cache writes | read-only OverlayFS lower + session upper | Strong for configured data directories |
 | Network IP connectivity | network namespace when policy is `off` | Isolated for IPv4/IPv6 TCP/UDP; `host` remains unrestricted |
 | Filesystem Unix sockets | Landlock path rules | IPC boundary remains visible when its path is allowed |
-| Kernel | none | Out of scope for M2 |
+| MCP agent vs. upstream server | child sandbox process + stdio JSON-RPC proxy | Snapshot and process boundary; protocol content is not audited |
+| Kernel | none | Out of scope for M3 |
 | Host commit vs. partial writes | journal + backups + atomic renames | Strong for ordinary files |
+
+The MCP proxy starts a fresh upstream process inside a cowbox step for every
+`tools/call`. It does not keep a privileged or unsandboxed upstream alive.
+Control tools can inspect, roll back, or preview a commit, but cannot write the
+host. The upstream server's tool descriptions, returned content, and any data it
+sends to the agent are not security-reviewed by cowbox; install only servers
+you would run as local project tooling.
 
 ## 4. Landlock policy
 

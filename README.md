@@ -20,11 +20,11 @@
 </div>
 
 > [!IMPORTANT]
-> cowbox is an **M2 performance preview**. The engine targets Linux and WSL2;
-> Windows ships a native launcher that delegates into WSL. MCP proxying, a
-> native Windows file-edit backend, and macOS support are later milestones.
-> `run --network off` provides opt-in Linux network-namespace isolation for IP
-> traffic. See [docs/ROADMAP.md](docs/ROADMAP.md) for the staged plan.
+> cowbox is an **M3 agent snapshot preview**. The engine targets Linux and WSL2;
+> Windows ships a native launcher that delegates into WSL. `mcp-proxy` wraps a
+> stdio MCP server so each tool call becomes an inspectable, reversible cowbox
+> step. A native Windows file-edit backend and macOS support are later
+> milestones. See [docs/ROADMAP.md](docs/ROADMAP.md) for the staged plan.
 
 ## Why cowbox
 
@@ -62,6 +62,7 @@ cowbox doctor --check-run --network off # exercise the real startup chain
 cowbox stats                 # inspect logical steps, mount layers, disk use
 cowbox sessions              # list active and finalized sessions across projects
 cowbox gc --dry-run          # preview old session state that can be removed
+cowbox mcp-proxy -- <server> # expose a stdio MCP server behind cowbox snapshots
 ```
 
 All commands support `--json`. `run` also supports `--trace-chrome` for a
@@ -112,6 +113,11 @@ Chrome Trace JSON of namespace, mount, diff, and commit spans.
 - With `--network off`, the helper unshares a Linux network namespace after the
   UID/GID mapping and after OverlayFS setup, but before the user command starts.
   There is no fallback to the host namespace if that step fails.
+- `cowbox mcp-proxy` keeps the agent's MCP connection open, discovers upstream
+  tools in a one-off sandbox, and launches a fresh sandboxed upstream process
+  for every `tools/call`. The outer protocol exposes the upstream tools plus
+  read-only `cowbox_diff`, pointer-only `cowbox_rollback`, and dry-run-only
+  `cowbox_commit`.
 
 For the full call sequence, whiteout rules, and commit ordering, see
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -258,6 +264,62 @@ network-namespace, OverlayFS, state-disk, and Landlock failures. A network
 namespace setup failure returns `NETWORK_NAMESPACE_FAILED` with exit code 125
 and reports `command_started: false`.
 
+### MCP agent snapshots
+
+`mcp-proxy` is a stdio-to-stdio protocol bridge with a real cowbox step behind
+each mutating tool call:
+
+```bash
+cowbox mcp-proxy --network off -- python3 /path/to/your/mcp-server.py
+```
+
+Configure it as the agent harness's MCP command, for example:
+
+```json
+{
+  "mcpServers": {
+    "cowbox": {
+      "command": "/home/you/.cargo/bin/cowbox",
+      "args": [
+        "mcp-proxy",
+        "--network", "off",
+        "--",
+        "python3", "/path/to/your/mcp-server.py"
+      ]
+    }
+  }
+}
+```
+
+The first `tools/list` starts a one-off sandbox session under `/tmp`, runs the
+upstream `initialize` handshake and paginated `tools/list`, then removes the
+temporary state. It never adds a step to the project's active session.
+
+Every upstream `tools/call` starts a new cowbox step in the workspace session,
+launches a fresh sandboxed upstream process, performs one initialize/call
+cycle, and exits. Upstream servers that need state across calls must persist it
+in workspace files. Calls are serialized, the effective network policy and
+Landlock rules apply, and the result metadata reports `head_before`, the actual
+`step`, `head_after`, timeout state, and a rollback command.
+
+Three reserved control tools are always present:
+
+| Tool | Behavior |
+| --- | --- |
+| `cowbox_diff` | Read-only net diff for a step; defaults to the current head |
+| `cowbox_rollback` | Move the session head; never writes the host |
+| `cowbox_commit` | Existing commit dry-run; returns the target step and terminal command |
+
+`cowbox_commit` never writes the host. After human review, the user runs
+`cowbox commit --step <n>` in a terminal in the same workspace and completes the
+normal interactive confirmation.
+
+The first MCP version supports stdio tool servers only. Cross-call state lives
+in the workspace, not in a long-lived upstream process. HTTP/SSE upstreams,
+resources, prompts, and persistent MCP subprocesses are not implemented.
+`--timeout`, `--discovery-timeout`, `--max-response-bytes`, `--session`,
+`--workspace`, and repeatable `--allow-read` bound the proxy's behavior.
+
 ### Host cache reuse
 
 Cargo, npm, and pip can explicitly reuse a host cache as a read-only data
@@ -377,12 +439,14 @@ instrumented yet.
 | **M1** | Linux/WSL2 CLI, snapshot DAG, OverlayFS, Landlock, commit journal, tests, benchmarks | Preview available |
 | **M1.5** | Windows launcher, `setup`, multi-harness skill installer, project rules and policy | Preview available |
 | **M2** | Long sessions, network policy, offline diagnostics/workflows, read-only host caches, 200k-file benchmarks | Preview available |
-| **M3** | MCP proxy with `cowbox_diff` / `cowbox_rollback` / `cowbox_commit` meta-tools | Planned |
+| **M3** | MCP snapshot proxy, synthetic diff/rollback/commit tools, real-harness workflow | Preview available |
 | **M4** | Native Windows ReFS + Job Object backend, macOS backend, eval suite and public leaderboard | Planned |
 
 M1 explicitly excludes MCP, native Windows, macOS, network isolation, and
 multi-agent racing. M2 adds opt-in network-namespace isolation without claiming
-packet filtering or hostile-code isolation. The
+packet filtering or hostile-code isolation. M3 adds stdio MCP snapshot
+interception for tool servers, not protocol-level containment of an in-process
+or HTTP upstream. The
 [roadmap](docs/ROADMAP.md) keeps the boundaries honest.
 
 ## Contributing

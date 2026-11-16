@@ -4,6 +4,50 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0-m3] - 2026-11-16
+
+### Added
+
+- `cowbox mcp-proxy -- <upstream MCP server>` for stdio tool servers. The proxy
+  keeps the harness connection open, negotiates protocol versions, handles
+  request IDs, paginated tool discovery, timeouts, abnormal exits, response
+  limits, and client disconnects, and reserves stdout for JSON-RPC.
+- One-off sandbox tool discovery plus one real cowbox step for every upstream
+  `tools/call`. A sandboxed adapter starts a fresh upstream process, performs
+  initialization and one call, and exits; cross-call state is stored in
+  workspace files.
+- Reserved `cowbox_diff`, `cowbox_rollback`, and `cowbox_commit` MCP tools.
+  They expose read-only diff, head-only rollback, and the existing commit
+  dry-run with a terminal command. Upstream name collisions are rejected.
+- Snapshot metadata on every MCP result, including the bound session,
+  `head_before`, actual `step`, `head_after`, timeout state, and rollback
+  command.
+- Persistent Windows launcher stdio forwarding for `cowbox.exe mcp-proxy`.
+- MCP fixture integration coverage for normal calls, consecutive writes,
+  rollback/retry, upstream errors and timeouts, client disconnect, pagination,
+  name conflicts, response limits, and network policy `off`.
+
+### Changed
+
+- `doctor --check-run` now verifies the configured state path or nearest
+  existing parent is writable and searchable, and reports the inspected path,
+  filesystem, and access result. Plain static `doctor` still performs no write
+  probe.
+- Windows `doctor --json` preserves a valid Linux JSON envelope and exit code,
+  and returns structured `WSL_START_FAILED` when the configured distro cannot
+  start.
+- The release workflow writes LF-only Windows checksum files without trailing
+  whitespace and verifies every downloaded checksum before publishing.
+- The cowbox skill documents MCP snapshot use, rollback-first recovery, and the
+  terminal commit boundary.
+
+### Known limitations
+
+- MCP upstream transport is stdio only; HTTP/SSE, resources, prompts, and a
+  persistent upstream process are not implemented.
+- The native Windows file editor path still bypasses the WSL engine.
+- Cross-call upstream state must live in workspace files.
+
 ## [0.5.0-m2] - 2026-11-16
 
 ### Added
@@ -217,5 +261,7 @@ All notable changes to this project are documented here. The format follows
 - Hardlinks and xattrs are not preserved on commit in M1.
 
 [0.4.0-m2]: https://github.com/BangShou1st/cowbox/releases/tag/v0.4.0-m2
+[0.5.0-m2]: https://github.com/BangShou1st/cowbox/releases/tag/v0.5.0-m2
+[0.6.0-m3]: https://github.com/BangShou1st/cowbox/releases/tag/v0.6.0-m3
 [0.3.0-m1]: https://github.com/BangShou1st/cowbox/releases/tag/v0.3.0-m1
 [0.1.0-m1]: https://github.com/BangShou1st/cowbox/releases/tag/v0.1.0-m1

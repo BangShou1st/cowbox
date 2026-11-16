@@ -20,10 +20,10 @@
 </div>
 
 > [!IMPORTANT]
-> cowbox 目前是 **M2 性能预览版**。引擎运行在 Linux/WSL2，Windows 提供原生启动器
-> 并委托到 WSL。MCP 代理、Windows 原生文件编辑后端和 macOS 属于后续里程碑。
-> `run --network off` 已提供可选的 Linux 网络命名空间 IP 隔离。分阶段计划见
-> [docs/ROADMAP.md](docs/ROADMAP.md)。
+> cowbox 目前是 **M3 Agent 快照预览版**。引擎运行在 Linux/WSL2，Windows 提供原生
+> 启动器并委托到 WSL。`mcp-proxy` 将 stdio MCP server 的每次工具调用变成可检查、
+> 可回滚的 cowbox step。Windows 原生文件编辑后端和 macOS 属于后续里程碑。
+> 分阶段计划见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
 ## 为什么需要 cowbox
 
@@ -59,6 +59,7 @@ cowbox doctor --check-run --network off # 走真实启动链路做主动诊断
 cowbox stats                 # 查看逻辑步数、实际挂载层、磁盘占用
 cowbox sessions              # 列出所有项目的 active 与 finalized session
 cowbox gc --dry-run          # 预览可清理的旧 session 状态
+cowbox mcp-proxy -- <server> # 让 stdio MCP server 的每次调用都经过 cowbox 快照
 ```
 
 所有命令支持 `--json`；`run` 还支持 `--trace-chrome` 导出 namespace、mount、
@@ -101,6 +102,10 @@ diff、commit 的 Chrome Trace JSON。
   在步骤结束时回收后台子进程。
 - `--network off` 在 UID/GID 映射完成、OverlayFS 建好之后、用户命令启动之前创建
   Linux 网络命名空间；创建失败直接报错，不会回退到 host namespace。
+- `cowbox mcp-proxy` 维持 Agent 的 MCP 连接，在一次性沙盒中完成工具发现；每次
+  `tools/call` 都启动新的沙盒上游进程，并生成实际 step。外层协议暴露上游工具，
+  以及只读的 `cowbox_diff`、只移动指针的 `cowbox_rollback`、只做 dry-run 的
+  `cowbox_commit`。
 
 完整调用链、whiteout 规则与 commit 顺序见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
@@ -230,6 +235,57 @@ user namespace、network namespace、OverlayFS、状态盘和 Landlock 故障。
 命名空间创建失败返回 `NETWORK_NAMESPACE_FAILED`、退出码 125，并报告
 `command_started: false`。
 
+### MCP Agent 快照
+
+`mcp-proxy` 在 stdio 上维持 MCP 客户端连接，并为每次上游工具调用创建真实
+cowbox step：
+
+```bash
+cowbox mcp-proxy --network off -- python3 /path/to/your/mcp-server.py
+```
+
+在 Agent harness 中把它配置为 MCP 命令，例如：
+
+```json
+{
+  "mcpServers": {
+    "cowbox": {
+      "command": "/home/you/.cargo/bin/cowbox",
+      "args": [
+        "mcp-proxy",
+        "--network", "off",
+        "--",
+        "python3", "/path/to/your/mcp-server.py"
+      ]
+    }
+  }
+}
+```
+
+首次 `tools/list` 会在 `/tmp` 下启动一次性沙盒 session，完成上游 `initialize`
+握手和分页 `tools/list`，随后删除临时状态，不会污染项目 active session。
+
+每个上游 `tools/call` 都在当前 workspace session 中新建 step，启动全新沙盒上游
+进程，完成一次 initialize/call 后退出。需要跨调用保存状态的上游 server 应把状态
+写进 workspace 文件。调用串行执行，实际生效的网络策略与 Landlock 规则仍然适用；
+结果元数据包含 `head_before`、实际 `step`、`head_after`、超时状态和回滚命令。
+
+始终保留三个控制工具：
+
+| 工具 | 行为 |
+| --- | --- |
+| `cowbox_diff` | 只读净变更；默认当前 head |
+| `cowbox_rollback` | 移动 session head；不写宿主机 |
+| `cowbox_commit` | 复用现有 commit dry-run；返回目标 step 与终端命令 |
+
+`cowbox_commit` 永不写宿主机。人工检查后，由用户在同一 workspace 的终端执行
+`cowbox commit --step <n>` 并完成原有交互确认。
+
+首版 MCP 只支持 stdio 工具型上游；跨调用状态通过 workspace 文件保存，不维持长驻
+上游进程。HTTP/SSE、resources、prompts 和持久 MCP 子进程尚未实现。代理行为由
+`--timeout`、`--discovery-timeout`、`--max-response-bytes`、`--session`、
+`--workspace` 和可重复的 `--allow-read` 约束。
+
 ### 长会话与宿主缓存
 
 跨过物理层数或 lowerdir 长度限制时，cowbox 会自动压缩当前分支最旧的一段祖先层，
@@ -316,11 +372,12 @@ python3 scripts/offline_workflow.py \
 | **M1** | Linux/WSL2 CLI、快照 DAG、OverlayFS、Landlock、commit journal、测试、基准 | 预览可用 |
 | **M1.5** | Windows 启动器、`setup`、多 harness skill 安装、项目规则与策略 | 预览可用 |
 | **M2** | 长会话、网络策略、离线诊断/工作流、只读宿主缓存、20 万文件基准 | 预览可用 |
-| **M3** | MCP 代理（`cowbox_diff` / `cowbox_rollback` / `cowbox_commit`） | 计划中 |
+| **M3** | MCP 快照代理、diff/rollback/commit 控制工具、真实 harness 工作流 | 预览可用 |
 | **M4** | Windows 原生 ReFS + Job Object 后端、macOS 后端、Eval 套件与公开榜单 | 计划中 |
 
 M1 明确不包含 MCP、Windows 原生、macOS、网络隔离和多 Agent 赛马。M2 增加可选
-网络命名空间隔离，但不宣称包过滤或恶意代码隔离。边界以
+网络命名空间隔离，但不宣称包过滤或恶意代码隔离。M3 为工具型 stdio MCP server
+增加快照拦截，不对进程内或 HTTP 上游宣称协议级隔离。边界以
 [roadmap](docs/ROADMAP.md) 为准。
 
 ## 参与贡献

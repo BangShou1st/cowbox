@@ -57,7 +57,11 @@ pub enum CliCommand {
     Update(UpdateArgs),
     /// Convert a Windows path to its WSL path.
     Path(PathArgs),
+    /// Proxy a stdio MCP server through cowbox snapshots.
+    McpProxy(McpProxyArgs),
 
+    #[command(name = "__mcp-adapter", hide = true)]
+    McpAdapter(McpAdapterArgs),
     #[command(name = "__sandbox-exec", hide = true)]
     SandboxExec(HiddenArgs),
     #[command(name = "__supervisor", hide = true)]
@@ -305,6 +309,32 @@ pub struct PathArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct McpProxyArgs {
+    #[arg(long)]
+    pub workspace: Option<PathBuf>,
+    #[arg(long)]
+    pub session: Option<String>,
+    #[arg(long, value_enum)]
+    pub network: Option<NetworkModeArg>,
+    #[arg(long, default_value = "2m")]
+    pub timeout: String,
+    #[arg(long = "discovery-timeout", default_value = "60s")]
+    pub discovery_timeout: String,
+    #[arg(long = "max-response-bytes", default_value_t = 768 * 1024)]
+    pub max_response_bytes: usize,
+    #[arg(long = "allow-read")]
+    pub allow_read: Vec<PathBuf>,
+    #[arg(last = true, required = true, num_args = 1.., allow_hyphen_values = true)]
+    pub upstream: Vec<OsString>,
+}
+
+#[derive(Debug, Args)]
+pub struct McpAdapterArgs {
+    #[arg(long = "max-response-bytes", default_value_t = 768 * 1024)]
+    pub max_response_bytes: usize,
+}
+
+#[derive(Debug, Args)]
 pub struct HiddenArgs {
     #[arg(long)]
     pub spec: PathBuf,
@@ -332,6 +362,8 @@ impl CliCommand {
             CliCommand::Policy(_) => "policy",
             CliCommand::Update(_) => "update",
             CliCommand::Path(_) => "path",
+            CliCommand::McpProxy(_) => "mcp-proxy",
+            CliCommand::McpAdapter(_) => "__mcp-adapter",
             CliCommand::SandboxExec(_) => "__sandbox-exec",
             CliCommand::Supervisor(_) => "__supervisor",
         }
@@ -358,6 +390,7 @@ impl CliCommand {
             CliCommand::Policy(args) => args.json,
             CliCommand::Update(args) => args.json,
             CliCommand::Path(args) => args.json,
+            CliCommand::McpProxy(_) | CliCommand::McpAdapter(_) => false,
             _ => false,
         }
     }

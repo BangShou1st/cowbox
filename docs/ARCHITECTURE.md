@@ -6,7 +6,8 @@ cowbox makes local workspace mutations by an AI coding agent cheap to inspect
 and cheap to reverse. It does this without a VM, without a container image, and
 without replacing the developer's toolchain.
 
-The M2 design has five properties:
+The M3 design retains the M2 engine and adds a protocol layer with six
+properties:
 
 1. **Millisecond setup.** The workspace is a read-only lowerdir; each step adds
    a writable upperdir on ext4.
@@ -18,12 +19,18 @@ The M2 design has five properties:
    drift-checked, topologically ordered commit.
 5. **Explicit network policy.** Steps default to the host network; `off`
    removes IP connectivity in a private network namespace without a fallback.
+6. **Agent-visible snapshots.** A stdio MCP proxy makes every upstream tool call
+   a real cowbox step and reserves control tools for diff, rollback, and commit
+   preview.
 
-## 2. Non-goals for M2
+## 2. Non-goals for M3
 
 - Selective destination filtering or packet-level network policy.
 - A native Windows or macOS backend.
-- MCP proxying or agent-specific protocol integration.
+- HTTP/SSE MCP upstream transport, resources, prompts, or a long-lived upstream
+  MCP process.
+- MCP content inspection, policy rewriting, or hostile-server isolation beyond
+  the existing process and filesystem boundary.
 - Multi-agent parallel racing.
 - Hostile-code containment equivalent to a VM.
 
@@ -32,7 +39,7 @@ The M2 design has five properties:
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
 │ cowbox-cli                                                      │
-│ clap commands · session store · JSON/human rendering · helper   │
+│ clap · session store · JSON/human rendering · helper · MCP      │
 └───────────────┬─────────────────────────────────┬───────────────┘
                 │                                 │
 ┌───────────────▼─────────────────┐  ┌────────────▼──────────────┐
@@ -69,6 +76,11 @@ the workspace must not call syscalls directly.
 Argument parsing, workspace discovery, state persistence, locks, rendering, and
 the hidden `__sandbox-exec` / `__supervisor` helper entry points. The CLI
 orchestrates; it does not reimplement the engine.
+
+The M3 `mcp-proxy` and hidden `__mcp-adapter` live in the CLI. The proxy owns
+the agent connection and orchestration; the adapter runs inside a sandbox step
+and owns one upstream MCP initialize/call cycle. Neither duplicates OverlayFS,
+Landlock, network, lock, or DAG logic.
 
 ## 4. State layout
 
@@ -374,7 +386,51 @@ preserve the conflicting content before retrying recovery.
 `target/`, `node_modules/`, and `.venv/` are ignored unless
 `--include-excluded` is explicit.
 
-## 8. Observability
+## 8. MCP proxy
+
+`cowbox mcp-proxy` is a thin JSON-RPC layer that does not call the engine
+directly. Tool discovery and every upstream `tools/call` run through a child
+`cowbox run` process, reusing the existing session lock, OverlayFS setup,
+Landlock, PID supervisor, and policy enforcement.
+
+```text
+agent harness (stdio JSON-RPC)
+       |
+       v
+cowbox mcp-proxy (serialized event loop)
+       |
+       +-- tools/list --> cowbox run in temp state -> upstream init + paginated list
+       |
+       +-- tools/call --> cowbox run in active session -> adapter -> one init + call
+```
+
+Tool discovery uses a state root under `/tmp`, so the project's active session
+is untouched. The result is cached for the proxy lifetime. Upstream names
+colliding with reserved control tools are rejected.
+
+Each upstream call is treated as write-capable and records a step. The upstream
+process is started fresh for each call; cross-call state must live in workspace
+files. Every tool result carries `_meta.cowbox` with the bound session,
+`head_before`, actual `step`, `head_after`, exit status, timeout flag, and
+rollback/commit commands. A visible content block repeats the snapshot summary.
+
+The reserved control tools do not create steps:
+
+- `cowbox_diff` runs the existing read-only diff path;
+- `cowbox_rollback` moves the DAG head;
+- `cowbox_commit` runs the existing dry-run and returns a terminal command.
+
+Client disconnect, upstream timeout or abnormal exit, oversized output, and
+protocol errors are converted into bounded JSON-RPC errors or `isError` tool
+results. If a step was already recorded, the metadata still identifies it so
+the agent can call `cowbox_rollback`.
+
+The adapter maps absolute upstream command arguments that start with the
+workspace root into the merged overlay mount. This allows file-based MCP server
+scripts under the workspace without granting read access to the live host path.
+Relative paths already resolve inside the merged mount.
+
+## 9. Observability
 
 `tracing` spans cover namespace setup, mount, Landlock, diff, and commit.
 `--trace-chrome` emits a Chrome Trace JSON file. `doctor` runs static capability
@@ -397,11 +453,12 @@ snapshot, and whether network isolation is active.
 cowbox does **not** count blocked writes: Landlock denials are silent. The field is
 reported as not instrumented rather than invented.
 
-## 9. WSL2 bridge notes
+## 10. WSL2 bridge notes
 
 The engine runs as a Linux binary inside WSL2. The native Windows launcher
 forwards commands, including all `doctor` arguments, exit codes, and output
-through `wsl.exe`:
+through `wsl.exe`. For `mcp-proxy`, it inherits stdin, stdout, and stderr so the
+MCP JSON-RPC stream is neither decoded nor buffered:
 
 - Source may be on `/mnt/e`; upper and work layers must be on ext4.
 - `/mnt/e` works as a read-only lowerdir in testing, but 9p has different
@@ -409,7 +466,7 @@ through `wsl.exe`:
 - `WSL_INTEROP` must be unset and Windows PATH entries removed before spawning
   the command, otherwise a sandboxed process could invoke Windows binaries.
 
-## 10. Failure modes
+## 11. Failure modes
 
 | Failure | Behavior |
 | --- | --- |
@@ -418,9 +475,13 @@ through `wsl.exe`:
 | OverlayFS mount fails | `OVERLAYFS_FAILED`; no copy fallback |
 | Landlock unavailable | `LANDLOCK_FAILED`; command does not run |
 | State dir on 9p/without xattr | `CowUnsupported` with a path hint |
+| State path not writable/searchable | active doctor reports `STATE_DISK_NOT_READY`; command never starts |
 | Command times out | kill namespace, exit 124, record a step |
 | Host file changed during session | commit conflict; `--force` still backs up |
 | Commit interrupted | journal restore; manual recovery path if restore fails |
 | Whiteout format differs from expectation | both char-device and xattr forms supported |
 | Layer compaction interrupted | journaled modes restored before readers or retry; temporary output is discarded |
 | Configured host cache data is missing | actionable config error before the command runs |
+| MCP client disconnects mid-call | kill the sandbox process tree; proxy exits |
+| MCP tool name conflicts with a reserved control | `tools/list` returns `MCP_TOOL_NAME_CONFLICT` |
+| MCP call times out | step is recorded; result includes rollback metadata |

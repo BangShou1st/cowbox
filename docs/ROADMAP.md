@@ -40,7 +40,7 @@ Status: preview released in `0.3.0-m1`.
 - [x] Global `sessions` inventory and safe `gc` for finalized state.
 - [x] Commit hardening: SQLite sidecars, hardlinks, `user.*` xattrs, and
   restore-or-finalize journals for process interruptions.
-- [ ] MCP server (`cowbox mcp`) for MCP-native agents.
+- [x] MCP integration via `cowbox mcp-proxy` for MCP-native agents.
 
 ## M2: stronger containment and scale
 
@@ -75,12 +75,26 @@ workflows, read-only host cache reuse, and the regression round.
 
 ## M3: agent integration
 
-- `cowbox mcp-proxy -- <upstream MCP server>` with transparent stdio JSON-RPC
-  forwarding.
-- Synthetic MCP tools: `cowbox_diff`, `cowbox_rollback`, `cowbox_commit`.
-- Auto-checkpoint on mutating `tools/call` requests.
-- A `skills/cowbox/SKILL.md` workflow that prefers rollback over stacking
-  speculative fixes.
+Status: preview available in `0.6.0-m3`.
+
+- [x] `cowbox mcp-proxy -- <upstream MCP server>` for stdio tool servers.
+- [x] Initialization, capability negotiation, ping, paginated `tools/list`,
+  request IDs, timeouts, abnormal upstream exits, response limits, and client
+  disconnect handling.
+- [x] One-off sandbox discovery plus one real cowbox step for every upstream
+  `tools/call`; calls are serialized and cross-call state lives in workspace
+  files.
+- [x] Reserved synthetic tools `cowbox_diff`, `cowbox_rollback`, and
+  `cowbox_commit`, including upstream name-conflict detection.
+- [x] Dry-run-only commit preview. The host write remains a terminal
+  `cowbox commit --step <n>` with the existing human confirmation.
+- [ ] Linux/WSL2 fixture coverage and a real agent-harness workflow.
+- [ ] Persistent Windows launcher stdio forwarding through the real
+  `cowbox.exe -> wsl.exe -> Linux cowbox` path.
+- [x] `skills/cowbox` guidance that prefers rollback over stacking speculative
+  fixes.
+- [ ] HTTP/SSE upstream transport, resources, prompts, and a persistent
+  upstream MCP process. The first version starts the upstream per call.
 
 ## M4: native platforms and evaluation
 

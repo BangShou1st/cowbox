@@ -1,6 +1,6 @@
 # Windows
 
-cowbox M2 ships a native `cowbox.exe` launcher. The engine still runs in
+cowbox M3 ships a native `cowbox.exe` launcher. The engine still runs in
 WSL2; the project does not need to move out of `E:\...`.
 
 ## Install
@@ -37,6 +37,27 @@ cowbox commit
 `cowbox.exe` calls `wsl.exe --cd <cwd>`, so the project is visible as
 `/mnt/e/project/your-app` inside WSL. State remains on WSL ext4.
 
+## MCP stdio forwarding
+
+`cowbox.exe mcp-proxy ...` uses inherited stdin, stdout, and stderr instead of
+the buffered command path. The MCP JSON-RPC connection stays open across many
+requests and is forwarded through `wsl.exe` to the Linux engine:
+
+```powershell
+cowbox mcp-proxy --network off -- `
+  python3 E:\project\your-app\mcp-server.py
+```
+
+The upstream command after `--` must run inside WSL. A Windows-native MCP server
+executable is not supported by this first version. When a Linux argument is an
+absolute path under the workspace, the sandbox adapter maps it to the merged
+OverlayFS mount; for a Windows path configure its WSL form, for example
+`/mnt/e/project/your-app/mcp-server.py`.
+
+The agent harness should launch the real Windows launcher. It should not wrap
+`cowbox.exe` in a helper that buffers stdout: MCP requires a persistent,
+line-delimited JSON-RPC stream.
+
 `cowbox.exe` forwards every `doctor` argument, including
 `--check-run --network off`, through the same `wsl.exe` command shape used by
 `run`, `diff`, and the other engine commands. Linux stdout, stderr, and the exit
@@ -62,6 +83,6 @@ controls the default trigger policy. `cowbox install-rules` (or
 
 ## Boundary
 
-Codex Desktop's built-in file editor is still outside the WSL sandbox in M2.
+Codex Desktop's built-in file editor is still outside the WSL sandbox in M3.
 Commands routed through `cowbox` are protected; native Windows file-edit
 interception is a later milestone.

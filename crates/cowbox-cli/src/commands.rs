@@ -1,8 +1,8 @@
 use crate::agent::{config as agent_config, harness, policy, rules, skill};
 use crate::cli::{
     CliCommand, CommitArgs, DemoArgs, DiffArgs, DiscardArgs, DoctorArgs, GcArgs, HiddenArgs,
-    InitArgs, InstallRulesArgs, InstallSkillArgs, LogArgs, PathArgs, PolicyArgs, RollbackArgs,
-    RunArgs, SessionsArgs, SetupArgs, StatsArgs, UndoArgs, UpdateArgs,
+    InitArgs, InstallRulesArgs, InstallSkillArgs, LogArgs, McpAdapterArgs, McpProxyArgs, PathArgs,
+    PolicyArgs, RollbackArgs, RunArgs, SessionsArgs, SetupArgs, StatsArgs, UndoArgs, UpdateArgs,
 };
 use crate::config::{Config, RunPolicyOverrides};
 #[cfg(not(windows))]
@@ -57,6 +57,8 @@ pub fn dispatch(command: &CliCommand) -> CliResult<i32> {
         CliCommand::Policy(args) => command_policy(args),
         CliCommand::Update(args) => command_update(args),
         CliCommand::Path(args) => command_path(args),
+        CliCommand::McpProxy(args) => command_mcp_proxy(args),
+        CliCommand::McpAdapter(args) => command_mcp_adapter(args),
         CliCommand::SandboxExec(args) => command_hidden(args, true),
         CliCommand::Supervisor(args) => command_hidden(args, false),
     }
@@ -1506,6 +1508,14 @@ fn command_path(args: &PathArgs) -> CliResult<i32> {
         }
         Ok(0)
     }
+}
+
+fn command_mcp_proxy(args: &McpProxyArgs) -> CliResult<i32> {
+    crate::mcp::proxy_main(args)
+}
+
+fn command_mcp_adapter(args: &McpAdapterArgs) -> CliResult<i32> {
+    crate::mcp::adapter_main(args)
 }
 
 fn command_hidden(args: &HiddenArgs, sandbox_exec: bool) -> CliResult<i32> {

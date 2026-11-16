@@ -76,8 +76,14 @@ If commit reports `COMMIT_RECOVERY_REQUIRED`, stop editing and run
 point or finalizes an already-applied commit; do not force recovery over
 reported host drift.
 
-cowbox protects local workspace files. It does not isolate the network, reverse
-remote database/service changes, or prevent readable files from leaving the
+If cowbox MCP tools are configured, use the upstream file tools for edits and
+inspect `_meta.cowbox` after each call. Use `cowbox_diff` before retrying and
+`cowbox_rollback` to discard a bad step. `cowbox_commit` only previews; the user
+must run `cowbox commit --step <n>` in a terminal and approve it.
+
+cowbox protects local workspace files. The default network policy is `host`;
+`--network off` isolates IPv4/IPv6 TCP/UDP connectivity but does not reverse
+remote database/service changes or prevent readable files from leaving the
 machine.
 
 This policy protects commands routed through cowbox. Codex Desktop's built-in
