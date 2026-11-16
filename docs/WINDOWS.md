@@ -115,7 +115,9 @@ A commit binds the session, step, host baseline, and preview target:
    Drift is refused unless `--force` is explicit; `--force` still backs up the
    actual host bytes.
 2. A journal is written under the session's `commits/` directory with the
-   operation list and target manifest hash.
+   operation list and target manifest hash. Before every host mutation the
+   journal records the active operation, so recovery can reconcile an
+   operation whose bytes landed but whose completion counter did not.
 3. Existing bytes are copied into a journal backup with SHA-256 verification.
 4. Removed paths are deleted in reverse depth order, new directories are
    created top-down, and files are written through a same-directory temp file
@@ -129,10 +131,12 @@ A commit binds the session, step, host baseline, and preview target:
 7. Session finalization is persisted before backup payloads are pruned.
 
 If the process stops before `applied`, `win commit --recover --session <id>`
-restores the pre-commit host. If it stops at or after `applied`, recovery
-verifies the target and finalizes the session. Recovery is idempotent and can
-itself be interrupted and retried. File-busy, host-drift, and ACL/hardlink
-errors keep the journal and recovery material for inspection.
+restores the pre-commit host, including an operation that was written before
+its completion count was persisted. Recovery checks the target hash, backup,
+and current node type before restoring each operation, so writes, deletes, and
+directory creation are all idempotent. If it stops at or after `applied`,
+recovery verifies the target and finalizes the session. File-busy, host-drift,
+and ACL/hardlink errors keep the journal and recovery material for inspection.
 
 `WIN_FAULT_ABORT` with exit code 70 is reserved for deterministic test
 injection; a normal user should run the `--recover` command it prints.
