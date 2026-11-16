@@ -1,5 +1,42 @@
 # Release verification
 
+## v0.7.2-m4 Windows delete attribute patch
+
+- Tag: `v0.7.2-m4`
+- Release commit: `a1c5b76`
+- Release workflow: https://github.com/BangShou1st/cowbox/actions/runs/43909535977
+- Release: https://github.com/BangShou1st/cowbox/releases/tag/v0.7.2-m4
+- Type: GitHub pre-release
+
+Published archive hashes:
+
+| Asset | SHA-256 |
+| --- | --- |
+| `cowbox-v0.7.2-m4-x86_64-unknown-linux-gnu.tar.gz` | `a433ed497e42c8713dccff44d75689e5d78b36de859deaaa2461f0e5e1690528` |
+| `cowbox-v0.7.2-m4-x86_64-pc-windows-msvc.zip` | `2cfdfba877c33c9e1dcbc3b9bdd3b3f2202426455c5972071edc680391701a6f` |
+
+Downloaded assets were re-hashed and matched their published `.sha256` files.
+
+Extracted binary hashes:
+
+| Binary | SHA-256 |
+| --- | --- |
+| Linux `cowbox` | `74e4da90eb6b54e5271818a2a17ed6201e15b5f65ccaa01bbcd0644d91d96dbd` |
+| Windows `cowbox.exe` | `3e59ef1a865c79e455b19ed665603ba4bd8a56b5d4559b0a14a9fb853455442c` |
+
+Acceptance used the downloaded Windows ZIP:
+
+1. `cowbox.exe --version` reported `0.7.2-m4`; the archive and extracted EXE
+   hashes matched the published checksums.
+2. A read-only host file was made read-only again after a refused deletion:
+   the first commit returned `WIN_FILE_BUSY`, kept `A0`, and left the file
+   read-only. After the holding handle closed, the retry committed and removed
+   the file.
+3. Windows CI passed the 19-test native suite, the existing agent/CLI tests,
+   and the Linux adversarial/MCP/smoke suites on Ubuntu 22.04 and 24.04.
+
+No release asset was rebuilt or modified during acceptance.
+
 ## v0.7.1-m4 Windows write-back recovery patch
 
 - Tag: `v0.7.1-m4`
