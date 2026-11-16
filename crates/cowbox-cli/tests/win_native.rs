@@ -758,6 +758,41 @@ fn busy_readonly_file_keeps_its_attribute_after_refused_commit() {
 }
 
 #[test]
+fn busy_readonly_file_keeps_its_attribute_after_refused_delete() {
+    let fx = Fixture::new();
+    write(&fx.workspace.join("a.txt"), "A0");
+    let host = fx.workspace.join("a.txt");
+    let mut permissions = fs::metadata(&host).expect("metadata").permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&host, permissions).expect("readonly");
+    let (id, managed) = fx.init();
+    fs::remove_file(managed.join("a.txt")).expect("delete managed a");
+    checkpoint(&fx, &id);
+
+    let handle = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(&host)
+        .expect("hold file");
+    let (code, value) = commit(&fx, &id, &[]);
+    assert_ne!(code, 0);
+    assert_eq!(value["error"]["code"], "WIN_FILE_BUSY");
+    assert_eq!(read(&host), "A0");
+    assert!(
+        fs::metadata(&host)
+            .expect("host metadata")
+            .permissions()
+            .readonly(),
+        "a failed busy delete must restore the host read-only attribute"
+    );
+    drop(handle);
+
+    let (code, value) = commit(&fx, &id, &[]);
+    assert_eq!(code, 0, "{value}");
+    assert!(!host.exists());
+}
+
+#[test]
 fn file_and_directory_swaps_commit_in_both_directions() {
     let fx = Fixture::new();
     write(&fx.workspace.join("file-to-dir"), "old-file");

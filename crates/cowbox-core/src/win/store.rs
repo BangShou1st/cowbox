@@ -210,6 +210,13 @@ pub fn clear_readonly(path: &Path) -> WinResult<()> {
     Ok(())
 }
 
+pub fn set_readonly(path: &Path, readonly: bool) -> WinResult<()> {
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_readonly(readonly);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
 pub fn set_mtime(path: &Path, unix_ms: i64) -> WinResult<()> {
     let seconds = unix_ms.div_euclid(1000);
     let nanos = (unix_ms.rem_euclid(1000) as u32) * 1_000_000;
