@@ -752,6 +752,118 @@ fn commit_interruption_before_commit_point_restores_host_and_preserves_backup() 
 }
 
 #[test]
+fn commit_recovery_rolls_back_its_own_directory_intermediate_state() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    let swap = env.workspace.path().join("swap");
+    fs::write(&swap, "before\n").expect("base swap file");
+    env.init();
+    let (code, run) = run_script(
+        &env,
+        "set -e\nrm swap\nmkdir swap\nprintf 'committed child\\n' > swap/child.txt",
+    );
+    assert_eq!(code, 0, "directory type-change run failed: {run}");
+    let session_id = run["session"]["id"].as_str().expect("session id");
+
+    let crashed = crash_cowbox(
+        &env,
+        &["commit", "--yes", "--json"],
+        "commit-after-first-write",
+    );
+    assert_sigkill(&crashed);
+    let journal = only_commit_journal(&env, session_id);
+    assert_eq!(journal_phase(&journal), "applying");
+    assert!(
+        fs::symlink_metadata(&swap)
+            .expect("intermediate directory")
+            .is_dir()
+    );
+    assert_eq!(
+        fs::metadata(&swap).expect("intermediate mode").mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::read_to_string(swap.join("child.txt")).expect("intermediate child"),
+        "committed child\n"
+    );
+
+    let (code, recovered) = env.json(&["commit", "--recover", "--yes", "--json"]);
+    assert_eq!(
+        code, 0,
+        "recovery rejected its own directory intermediate state: {recovered}"
+    );
+    assert_eq!(recovered["data"]["action"].as_str(), Some("restore_host"));
+    assert_eq!(
+        fs::read_to_string(&swap).expect("restored swap file"),
+        "before\n"
+    );
+    assert!(!swap.join("child.txt").exists());
+    assert_eq!(journal_phase(&journal), "rolled_back");
+}
+
+#[test]
+fn commit_recovery_preserves_user_content_inside_an_interrupted_directory() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    let swap = env.workspace.path().join("swap");
+    fs::write(&swap, "before\n").expect("base swap file");
+    env.init();
+    let (code, run) = run_script(
+        &env,
+        "set -e\nrm swap\nmkdir swap\nprintf 'committed child\\n' > swap/child.txt",
+    );
+    assert_eq!(code, 0, "directory type-change run failed: {run}");
+    let session_id = run["session"]["id"].as_str().expect("session id");
+    let crashed = crash_cowbox(
+        &env,
+        &["commit", "--yes", "--json"],
+        "commit-after-first-write",
+    );
+    assert_sigkill(&crashed);
+    let journal = only_commit_journal(&env, session_id);
+
+    let user_file = swap.join("user.txt");
+    fs::write(&user_file, "user data\n").expect("user content after interruption");
+    let (code, refused) = env.json(&["commit", "--recover", "--yes", "--json"]);
+    assert_ne!(
+        code, 0,
+        "recovery accepted unexpected user content: {refused}"
+    );
+    assert_eq!(
+        refused["error"]["code"].as_str(),
+        Some("COMMIT_FAILED"),
+        "unexpected refusal: {refused}"
+    );
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("host content changed inside")),
+        "refusal did not explain the directory drift: {refused}"
+    );
+    assert_eq!(
+        fs::read_to_string(&user_file).expect("preserved user content"),
+        "user data\n"
+    );
+    assert_eq!(journal_phase(&journal), "applying");
+    assert!(journal.join("backup").is_dir());
+
+    fs::remove_file(&user_file).expect("remove user content before retry");
+    let (code, recovered) = env.json(&["commit", "--recover", "--yes", "--json"]);
+    assert_eq!(code, 0, "retry after resolving drift failed: {recovered}");
+    assert_eq!(recovered["data"]["action"].as_str(), Some("restore_host"));
+    assert_eq!(
+        fs::read_to_string(&swap).expect("restored swap file"),
+        "before\n"
+    );
+    assert!(!swap.join("child.txt").exists());
+    assert_eq!(journal_phase(&journal), "rolled_back");
+}
+
+#[test]
 fn interrupted_recovery_is_idempotent_and_can_resume() {
     let env = TestEnv::new();
     if !require_sandbox(&env) {

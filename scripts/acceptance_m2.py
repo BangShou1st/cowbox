@@ -188,6 +188,13 @@ def state_for(root: Path, name: str) -> Path:
     return state
 
 
+def commit_journals(state: Path) -> list[Path]:
+    root = state / "sessions"
+    if not root.is_dir():
+        return []
+    return sorted(path for path in root.glob("*/commit/*") if path.is_dir())
+
+
 def write_fixture(workspace: Path) -> None:
     (workspace / ".git").mkdir()
     (workspace / "modify.txt").write_text("old\n", encoding="utf-8")
@@ -373,6 +380,80 @@ def main() -> int:
     ).read_text(encoding="utf-8") != "commit recovery\n":
         raise AcceptanceError("commit retry wrote the wrong content")
 
+    directory_workspace = root / "directory-recovery-workspace"
+    directory_workspace.mkdir()
+    (directory_workspace / ".git").mkdir()
+    swap = directory_workspace / "swap"
+    swap.write_text("before\n", encoding="utf-8")
+    directory_state = state_for(root, "directory-recovery-state")
+    invoke(binary, directory_workspace, directory_state, ["init", "--json"])
+    directory_session = run(
+        binary,
+        directory_workspace,
+        directory_state,
+        "set -e\nrm swap\nmkdir swap\nprintf 'committed child\\n' > swap/child.txt",
+    )
+    if directory_session["data"]["step"] != 1:
+        raise AcceptanceError(
+            f"directory recovery session step was not 1: {directory_session}"
+        )
+    directory_crash, _directory_crashed = invoke(
+        binary,
+        directory_workspace,
+        directory_state,
+        ["commit", "--yes", "--json"],
+        extra_env={"COWBOX_TEST_CRASH": "commit-after-first-write"},
+        expect_success=False,
+        expect_json=False,
+    )
+    if directory_crash.returncode != -signal.SIGKILL:
+        raise AcceptanceError("directory commit recovery injection did not terminate")
+    if not commit_journals(directory_state):
+        raise AcceptanceError("directory commit crash left no journal")
+    if not swap.is_dir() or swap.stat().st_mode & 0o777 != 0o700:
+        raise AcceptanceError(f"expected a 0700 intermediate directory: {swap}")
+
+    user_file = swap / "user.txt"
+    user_file.write_text("user data\n", encoding="utf-8")
+    directory_refused_process, directory_refused = invoke(
+        binary,
+        directory_workspace,
+        directory_state,
+        ["commit", "--recover", "--yes", "--json"],
+        expect_success=False,
+    )
+    if (
+        directory_refused_process.returncode == 0
+        or directory_refused["error"]["code"] != "COMMIT_FAILED"
+        or "host content changed inside" not in directory_refused["error"]["message"]
+    ):
+        raise AcceptanceError(
+            f"directory recovery did not preserve user content: {directory_refused}"
+        )
+    if user_file.read_text(encoding="utf-8") != "user data\n":
+        raise AcceptanceError("directory recovery damaged user content")
+    if not commit_journals(directory_state):
+        raise AcceptanceError("directory recovery removed the journal after refusal")
+
+    user_file.unlink()
+    _directory_recovered_process, directory_recovered = invoke(
+        binary,
+        directory_workspace,
+        directory_state,
+        ["commit", "--recover", "--yes", "--json"],
+    )
+    if directory_recovered["data"]["action"] != "restore_host":
+        raise AcceptanceError(
+            f"directory intermediate state did not roll back: {directory_recovered}"
+        )
+    if not swap.is_file() or swap.read_text(encoding="utf-8") != "before\n":
+        raise AcceptanceError("directory recovery did not restore the original file")
+    if commit_journals(directory_state):
+        journal = commit_journals(directory_state)[0]
+        meta = json.loads((journal / "meta.json").read_text(encoding="utf-8"))
+        if meta["phase"] != "rolled_back":
+            raise AcceptanceError(f"directory journal was not rolled back: {meta}")
+
     result = {
         "binary": str(binary),
         "filesystem": filesystem,
@@ -386,6 +467,15 @@ def main() -> int:
         "commit_changes": len(committed["data"]["changes"]),
         "recovery_action": recovered["data"]["action"],
         "recovery_restored": recovered["data"]["restored"],
+        "directory_recovery": {
+            "intermediate_mode": "0700",
+            "refusal_code": directory_refused["error"]["code"],
+            "user_content_preserved": True,
+            "journal_retained_after_refusal": True,
+            "action": directory_recovered["data"]["action"],
+            "restored": directory_recovered["data"]["restored"],
+            "swap_restored": True,
+        },
     }
     if args.json_output:
         args.json_output.parent.mkdir(parents=True, exist_ok=True)

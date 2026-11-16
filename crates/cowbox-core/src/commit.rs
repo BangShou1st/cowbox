@@ -225,6 +225,12 @@ fn commit_layers_with_modes(
         Err(error) => {
             meta.phase = CommitPhase::Restoring;
             let _ = write_json_atomic(&journal_dir.join("meta.json"), &meta);
+            if let Err(state_error) = ensure_host_state(layout, &ops, HostState::PreOrPost) {
+                return Err(CoreError::CommitFailed(format!(
+                    "{error}; recovery preflight failed: {state_error}; journal kept at {}",
+                    journal_dir.display()
+                )));
+            }
             let restore = restore_ops(layout, &ops);
             if let Err(restore_error) = restore {
                 return Err(CoreError::CommitFailed(format!(
@@ -1543,7 +1549,11 @@ fn ensure_host_state(layout: &SessionLayout, ops: &[CommitOp], expected: HostSta
             Err(error) => return Err(error),
         };
         let matches = match expected {
-            HostState::PreOrPost => current == op.pre || current == op.post,
+            HostState::PreOrPost => {
+                current == op.pre
+                    || current == op.post
+                    || matches_recovery_intermediate(op, &current)
+            }
             HostState::PostOnly => current == op.post,
         };
         if !matches {
@@ -1562,7 +1572,188 @@ fn ensure_host_state(layout: &SessionLayout, ops: &[CommitOp], expected: HostSta
             "refusing commit recovery: affected host paths changed after the recorded pre/post state: {paths}; backups were preserved"
         )));
     }
+    if expected == HostState::PreOrPost {
+        ensure_host_subtrees(layout, ops)?;
+    }
     Ok(())
+}
+
+fn matches_recovery_intermediate(op: &CommitOp, current: &Fingerprint) -> bool {
+    let Fingerprint::Directory { mode, xattr_digest } = current else {
+        return false;
+    };
+    if *mode != 0o700 {
+        return false;
+    }
+    let Fingerprint::Directory {
+        xattr_digest: post_digest,
+        ..
+    } = &op.post
+    else {
+        return false;
+    };
+    if xattr_digest == post_digest {
+        return true;
+    }
+    if let Fingerprint::Directory {
+        xattr_digest: pre_digest,
+        ..
+    } = &op.pre
+    {
+        if xattr_digest == pre_digest {
+            return true;
+        }
+    }
+    *xattr_digest == crate::xattr::digest_entries(&[])
+}
+
+fn ensure_host_subtrees(layout: &SessionLayout, ops: &[CommitOp]) -> Result<()> {
+    let base = manifest::load_manifest(&layout.base_manifest_path())?;
+    let op_paths = ops
+        .iter()
+        .map(|op| op.rel_path.clone())
+        .collect::<BTreeSet<_>>();
+    let mut allowed_ancestors = BTreeSet::new();
+    for path in &op_paths {
+        for ancestor in path.ancestors().skip(1) {
+            if !ancestor.as_os_str().is_empty() {
+                allowed_ancestors.insert(ancestor.to_path_buf());
+            }
+        }
+    }
+
+    let mut roots = BTreeSet::new();
+    for op in ops {
+        if matches!(op.pre, Fingerprint::Directory { .. })
+            || matches!(op.post, Fingerprint::Directory { .. })
+        {
+            roots.insert(op.rel_path.clone());
+        }
+    }
+
+    let mut conflicts = BTreeSet::new();
+    for root in roots {
+        let host_root = layout.workspace.join(&root);
+        let Ok(metadata) = fs::symlink_metadata(&host_root) else {
+            continue;
+        };
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.mode() & 0o500 != 0o500
+        {
+            continue;
+        }
+        let mut seen = BTreeSet::new();
+        let mut blocked = BTreeSet::new();
+        walk_expected_subtree(
+            &host_root,
+            &root,
+            &layout.workspace,
+            &base,
+            &op_paths,
+            &allowed_ancestors,
+            &mut seen,
+            &mut blocked,
+            &mut conflicts,
+        )?;
+        for path in base.keys() {
+            if path.starts_with(&root)
+                && !op_paths.contains(path)
+                && !seen.contains(path)
+                && !blocked
+                    .iter()
+                    .any(|directory| path.starts_with(directory) && path != directory)
+            {
+                conflicts.insert(path.clone());
+            }
+        }
+    }
+
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+    let paths = conflicts
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(CoreError::CommitFailed(format!(
+        "refusing commit recovery: host content changed inside a directory affected by the commit: {paths}; backups were preserved"
+    )))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_expected_subtree(
+    directory: &Path,
+    relative: &Path,
+    workspace: &Path,
+    base: &BTreeMap<PathBuf, ManifestEntry>,
+    op_paths: &BTreeSet<PathBuf>,
+    allowed_ancestors: &BTreeSet<PathBuf>,
+    seen: &mut BTreeSet<PathBuf>,
+    blocked: &mut BTreeSet<PathBuf>,
+    conflicts: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            blocked.insert(relative.to_path_buf());
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut entries = entries.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if is_commit_temp_name(&entry.file_name()) {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        let rel_path = path
+            .strip_prefix(workspace)
+            .map_err(|_| {
+                CoreError::CommitFailed(format!(
+                    "commit recovery path escaped the workspace: {}",
+                    path.display()
+                ))
+            })?
+            .to_path_buf();
+        seen.insert(rel_path.clone());
+
+        let is_op = op_paths.contains(&rel_path);
+        let base_entry = base.get(&rel_path);
+        if !is_op {
+            if let Some(base_entry) = base_entry {
+                if !manifest::metadata_matches(base_entry, &path) {
+                    conflicts.insert(rel_path.clone());
+                }
+            } else if !allowed_ancestors.contains(&rel_path) {
+                conflicts.insert(rel_path.clone());
+                continue;
+            }
+        }
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            walk_expected_subtree(
+                &path,
+                &rel_path,
+                workspace,
+                base,
+                op_paths,
+                allowed_ancestors,
+                seen,
+                blocked,
+                conflicts,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn is_commit_temp_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(|name| {
+        name.starts_with('.') && name.ends_with(".tmp") && name.contains(".cowbox-")
+    })
 }
 
 fn post_requires_metadata_only(fingerprint: &Fingerprint) -> bool {

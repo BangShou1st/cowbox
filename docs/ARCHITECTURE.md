@@ -321,6 +321,15 @@ External edits cause recovery to stop with an explicit error and retain the
 journal and backups. The guarantee covers process interruption, not power loss
 or storage failure.
 
+Recovery also treats the commit's own `0700` directory preparation as a valid
+intermediate state. Before restoring a directory tree, it walks the host subtree
+and compares every entry with the journal operations and the base manifest.
+Files added by the user after the interruption, missing base entries, and
+content changes in unaffected descendants are reported instead of being deleted
+or overwritten. Temporary files created by the commit itself are ignored. The
+journal stays at `applying`/`restoring` so the user can remove the conflicting
+content and retry recovery.
+
 `.git` and `.cowbox` are never committed. Default excluded paths such as
 `target/`, `node_modules/`, and `.venv/` are ignored unless
 `--include-excluded` is explicit.

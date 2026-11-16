@@ -1007,6 +1007,96 @@ The final tree passed:
 Raw files are under
 `/home/bangshou/cowbox-bench-results/m2-permission-final-20261116/`.
 
+## M2 commit-recovery hardening
+
+This round starts from `c168afb5c2465311db833e23a0376214a10b3506` and fixes
+commit recovery after an interrupted apply. The release binary SHA-256 was
+`5ef971717022998a55c2c30c5fac72a014c0529fdf7a544aa321c7f3822aefe0`.
+All measurements used the same WSL2/ext4 profile, release settings, 20 samples,
+and one excluded warm-up per scenario.
+
+### Full harness
+
+Cells are median / P95 milliseconds.
+
+| Scenario | Files | Release candidate |
+| --- | ---: | ---: |
+| First run | 10,000 | **34.90 / 110.40** |
+| One parent layer | 10,000 | **24.22 / 29.49** |
+| 10-file diff | 10,000 | **10.59 / 14.66** |
+| First run | 200,000 | **121.26 / 136.85** |
+| One parent layer | 200,000 | **25.03 / 29.63** |
+| 10-file diff | 200,000 | **96.59 / 104.60** |
+
+The 10,000-file first-run P95 contains a retained host-noise outlier; its
+median remains inside the 60 ms limit. The fixed one-parent step measured
+29.24 / 33.21 ms after a 37.00 ms untimed preparation step.
+
+### Populated compaction
+
+| Metric | Value |
+| --- | ---: |
+| Upper entries | 10,000 |
+| Compaction step 151 | **461.58 ms** |
+| Mounted layers after compaction | 35 |
+| Compacted layers | 1 |
+| Reported compact bytes | 41,373,696 |
+
+### Commit-recovery acceptance
+
+The 300-step acceptance now has two additional commit-recovery scenarios:
+
+- a file-to-directory type change interrupted after the first host write leaves
+  the commit's own `0700` directory; recovery accepts that intermediate state
+  and restores the original file;
+- after the same interruption, a user file is written inside the prepared
+  directory; recovery refuses to delete it, reports the path, and retains the
+  journal and backups. Removing the user file allows the same recovery command
+  to finish and restore the original file.
+
+The complete 300-step run still produced 16 identical diff entries before and
+after compactions at steps 151 and 268, 35 mounted layers after each
+compaction, rollback to head 100, branch step 301, `COMMIT_CONFLICT` on host
+drift, an applied 16-change commit, and commit recovery with `restore_host`.
+
+The updated acceptance JSON SHA-256 was
+`f7a2bd78bb924ae4df9fbffad43460315c78d20b9ad298014e29987fedf5e62d`.
+
+### Criterion
+
+| Benchmark | Lower / estimate / upper |
+| --- | --- |
+| `diff_scan/10000_files_10_changes` | 3.8705 / **3.9379** / 3.9917 ms |
+| `rollback_dag/100_steps` | 9.9934 / **10.038** / 10.091 ns |
+| `run_true/10000_files_end_to_end` | 32.887 / **37.847** / 44.281 ms |
+
+`diff_scan` reported no change (`p=0.26`), `rollback_dag` improved by 4.40%,
+and `run_true` reported no statistically significant change (`p=0.12`).
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| `cargo fmt --check` | passed |
+| workspace Clippy with `-D warnings` | passed |
+| `cargo test --workspace` | 121 passed |
+| forced-sandbox `adversarial_suite` | 36 passed, 0 failed, sequentially |
+| `bash scripts/smoke.sh` | passed |
+
+### Artifacts
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Release binary | `5ef971717022998a55c2c30c5fac72a014c0529fdf7a544aa321c7f3822aefe0` |
+| `bench.json` | `9a416243b50791555614e052eb93c264f4df2ab7b673cdf3e202781e4a4abb03` |
+| `bench.md` | `c8e1d43a6f15050c25b1f5c751d05acadfcd6050c535feeb5e63f859705f5467` |
+| `bench.log` | `f398f31171dfa037b3663347a0cf28010be73dd9f6ad29005510f2b714a9f263` |
+| Criterion log | `00153f1fa2a501df4d48b1d875d8668952f18cdbced507ed65ccf1829eee61ef` |
+| Acceptance JSON | `f7a2bd78bb924ae4df9fbffad43460315c78d20b9ad298014e29987fedf5e62d` |
+
+Raw files are under
+`/home/bangshou/cowbox-bench-results/m2-commit-recovery-20261116/`.
+
 ## How to run
 
 ```bash

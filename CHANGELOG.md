@@ -68,6 +68,10 @@ All notable changes to this project are documented here. The format follows
 - Commit ordering now supports restrictive `000` directories and files,
   including directory mode finalization after child writes and recovery checks
   that cannot traverse a confirmed `000` parent.
+- Commit recovery now accepts its own `0700` directory preparation state,
+  verifies every host entry in affected directory trees against the journal and
+  base manifest, and refuses to delete or overwrite user content added after an
+  interruption; the journal and backups stay available for retry.
 - The adversarial long-session view check now runs with `set -e`, so every file,
   mode, xattr, symlink, and hardlink assertion can fail CI independently.
 
