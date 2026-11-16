@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 pub struct WinFaults {
     pub abort_after_backup: bool,
     pub abort_after_apply: Option<usize>,
+    pub abort_after_operation: Option<usize>,
     pub abort_before_applied: bool,
     pub abort_after_applied: bool,
     pub abort_during_recover: Option<usize>,
@@ -43,6 +44,8 @@ impl WinFaults {
                     other => {
                         if let Some(count) = other.strip_prefix("abort-after-apply:") {
                             faults.abort_after_apply = count.parse().ok();
+                        } else if let Some(count) = other.strip_prefix("abort-after-operation:") {
+                            faults.abort_after_operation = count.parse().ok();
                         } else if let Some(count) = other.strip_prefix("abort-during-recover:") {
                             faults.abort_during_recover = count.parse().ok();
                         }
@@ -127,6 +130,8 @@ struct WinJournal {
     ops: Vec<WinJournalOp>,
     backups: BTreeMap<String, WinBackup>,
     applied_ops: usize,
+    #[serde(default)]
+    active_op: Option<usize>,
     conflicts: Vec<String>,
     error: Option<String>,
 }
@@ -303,6 +308,7 @@ pub fn commit(
         ops,
         backups: BTreeMap::new(),
         applied_ops: 0,
+        active_op: None,
         conflicts: Vec::new(),
         error: None,
     };
@@ -626,70 +632,99 @@ fn prepare_backups(
     journal_dir: &Path,
 ) -> WinResult<()> {
     let base = session.base_manifest()?;
-    for op in &mut journal.ops {
+    for index in 0..journal.ops.len() {
+        let mut op = journal.ops[index].clone();
         let host_path = paths::join_key(&session.record.workspace, &op.rel_path)?;
-        if !host_path.exists() {
-            continue;
+        let base_entry = base.entries.get(&op.rel_path);
+        match op.kind {
+            WinOpKind::CreateDir => {
+                op.existed = false;
+            }
+            WinOpKind::DeleteDir => {
+                if host_path.exists() {
+                    paths::ensure_no_reparse(&host_path)?;
+                    paths::ensure_within(&session.record.workspace, &host_path)?;
+                    op.existed = host_path.is_dir();
+                } else {
+                    op.existed = false;
+                }
+            }
+            WinOpKind::DeleteFile | WinOpKind::WriteFile => {
+                let replaces_directory = op.kind == WinOpKind::WriteFile
+                    && base_entry.is_some_and(|entry| entry.kind == WinEntryKind::Directory);
+                if replaces_directory || !host_path.exists() {
+                    op.existed = false;
+                } else {
+                    paths::ensure_no_reparse(&host_path)?;
+                    paths::ensure_within(&session.record.workspace, &host_path)?;
+                    let case_only_rename = op.kind == WinOpKind::WriteFile
+                        && base_entry.is_none()
+                        && case_alias(&base, &op.rel_path).is_some();
+                    if !host_path.is_file() || case_only_rename {
+                        op.existed = false;
+                    } else {
+                        let backup = backup_existing_file(
+                            journal_dir,
+                            &mut op,
+                            &host_path,
+                            base_entry,
+                            journal.force,
+                        )?;
+                        journal.backups.insert(op.rel_path.clone(), backup);
+                    }
+                }
+            }
         }
-        if op.kind == WinOpKind::WriteFile
-            && !base.entries.contains_key(&op.rel_path)
-            && case_alias(&base, &op.rel_path).is_some()
-        {
-            op.existed = false;
-            continue;
-        }
-        paths::ensure_no_reparse(&host_path)?;
-        paths::ensure_within(&session.record.workspace, &host_path)?;
-        if host_path.is_dir() {
-            op.existed = true;
-            continue;
-        }
-        let backup_path = journal_dir
-            .join("backup")
-            .join(path_from_key(&op.rel_path)?);
-        if let Some(parent) = backup_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(&host_path, &backup_path).map_err(|error| {
-            WinError::io(
-                "WIN_FILE_BUSY",
-                format!("cannot back up {}", paths::display(&host_path)),
-                error,
-            )
-        })?;
-        let (size, sha256) = scan::hash_file(&backup_path)?;
-        let expected = base
-            .entries
-            .get(&op.rel_path)
-            .and_then(|entry| entry.sha256.clone());
-        if !journal.force && expected.as_deref() != Some(sha256.as_str()) {
-            return Err(WinError::new(
-                "WIN_HOST_DRIFT",
-                format!("{} changed after the preview was prepared", op.rel_path),
-            )
-            .exit(2));
-        }
-        let metadata = fs::metadata(&host_path)?;
-        let readonly = metadata.permissions().readonly();
-        let mtime_unix_ms = metadata.modified().ok().and_then(|time| {
-            time.duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|duration| duration.as_millis() as i64)
-        });
-        op.existed = true;
-        op.backup = Some(op.rel_path.clone());
-        journal.backups.insert(
-            op.rel_path.clone(),
-            WinBackup {
-                rel_path: paths::display(&backup_path),
-                sha256,
-                size,
-                readonly,
-                mtime_unix_ms,
-            },
-        );
+        journal.ops[index] = op;
     }
     Ok(())
+}
+
+fn backup_existing_file(
+    journal_dir: &Path,
+    op: &mut WinJournalOp,
+    host_path: &Path,
+    base_entry: Option<&WinEntry>,
+    force: bool,
+) -> WinResult<WinBackup> {
+    let backup_path = journal_dir
+        .join("backup")
+        .join(path_from_key(&op.rel_path)?);
+    if let Some(parent) = backup_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(host_path, &backup_path).map_err(|error| {
+        WinError::io(
+            "WIN_FILE_BUSY",
+            format!("cannot back up {}", paths::display(host_path)),
+            error,
+        )
+    })?;
+    let (size, sha256) = scan::hash_file(&backup_path)?;
+    let expected = base_entry.and_then(|entry| entry.sha256.clone());
+    if !force && expected.as_deref() != Some(sha256.as_str()) {
+        return Err(WinError::new(
+            "WIN_HOST_DRIFT",
+            format!("{} changed after the preview was prepared", op.rel_path),
+        )
+        .exit(2));
+    }
+    let metadata = fs::metadata(host_path)?;
+    let readonly = metadata.permissions().readonly();
+    let mtime_unix_ms = metadata.modified().ok().and_then(|time| {
+        time.duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_millis() as i64)
+    });
+    op.existed = true;
+    op.backup = Some(op.rel_path.clone());
+    Ok(WinBackup {
+        rel_path: paths::display(&backup_path),
+        sha256,
+        size,
+        readonly,
+        mtime_unix_ms,
+    })
 }
 
 fn case_alias(manifest: &WinManifest, key: &str) -> Option<String> {
@@ -719,6 +754,9 @@ fn apply_ops(
         if !journal.force {
             verify_expected_host(session, journal, &op)?;
         }
+        journal.active_op = Some(index);
+        journal.updated_at_unix_ms = super::store::now_ms();
+        write_journal(journal_path, journal)?;
         let host_path = paths::join_key(&session.record.workspace, &op.rel_path)?;
         match op.kind {
             WinOpKind::CreateDir => {
@@ -759,7 +797,14 @@ fn apply_ops(
                 write_file_atomic(&objects, &op, index, &host_path, journal)?;
             }
         }
+        if faults.abort_after_operation == Some(index + 1) {
+            return Err(WinError::fault_abort(
+                &format!("after-operation:{index}"),
+                journal_path,
+            ));
+        }
         journal.applied_ops = index + 1;
+        journal.active_op = None;
         journal.updated_at_unix_ms = super::store::now_ms();
         write_journal(journal_path, journal)?;
         if faults.abort_after_apply == Some(index + 1) {
@@ -850,13 +895,24 @@ fn write_file_atomic(
         let mut permissions = fs::metadata(&temp)?.permissions();
         permissions.set_readonly(op.readonly);
         fs::set_permissions(&temp, permissions)?;
-        if destination.exists() && destination.is_file() {
+        let destination_was_file = destination.is_file();
+        if destination_was_file {
             clear_readonly(destination)?;
         }
-        fs::rename(&temp, destination).map_err(|error| {
-            busy_or_io("cannot replace", destination, error)
-                .hint(format!("the staged file is {}", paths::display(&temp)))
-        })?;
+        if let Err(error) = fs::rename(&temp, destination) {
+            if destination_was_file && destination.is_file() {
+                if let Some(backup) = journal.backups.get(&op.rel_path) {
+                    if let Ok(mut permissions) =
+                        fs::metadata(destination).map(|metadata| metadata.permissions())
+                    {
+                        permissions.set_readonly(backup.readonly);
+                        let _ = fs::set_permissions(destination, permissions);
+                    }
+                }
+            }
+            return Err(busy_or_io("cannot replace", destination, error)
+                .hint(format!("the staged file is {}", paths::display(&temp))));
+        }
         Ok(())
     })();
     if result.is_err() {
@@ -990,7 +1046,7 @@ fn restore_ops(
     for (index, op) in journal
         .ops
         .iter()
-        .take(journal.applied_ops)
+        .take(restore_limit(journal))
         .enumerate()
         .rev()
     {
@@ -1005,6 +1061,10 @@ fn restore_ops(
         }
         let destination = paths::join_key(&session.record.workspace, &op.rel_path)?;
         if journal.conflicts.iter().any(|path| path == &op.rel_path) && destination.exists() {
+            restored += 1;
+            continue;
+        }
+        if !op_was_applied(journal, op, &destination)? {
             restored += 1;
             continue;
         }
@@ -1047,9 +1107,40 @@ fn restore_ops(
         journal.updated_at_unix_ms = super::store::now_ms();
         write_journal(journal_path, journal)?;
     }
+    journal.active_op = None;
+    journal.updated_at_unix_ms = super::store::now_ms();
+    write_journal(journal_path, journal)?;
     cleanup_temp_files(session, &journal.journal_id)?;
     let _ = journal_dir;
     Ok(restored)
+}
+
+fn restore_limit(journal: &WinJournal) -> usize {
+    journal
+        .applied_ops
+        .max(journal.active_op.map(|index| index + 1).unwrap_or(0))
+}
+
+fn op_was_applied(journal: &WinJournal, op: &WinJournalOp, destination: &Path) -> WinResult<bool> {
+    match op.kind {
+        WinOpKind::WriteFile => {
+            if !destination.is_file() {
+                return Ok(false);
+            }
+            let (_, sha256) = scan::hash_file(destination)?;
+            if op.object.as_deref() == Some(sha256.as_str()) {
+                return Ok(true);
+            }
+            if let Some(backup) = journal.backups.get(&op.rel_path) {
+                if backup.sha256 == sha256 {
+                    return Ok(false);
+                }
+            }
+            Ok(false)
+        }
+        WinOpKind::DeleteFile | WinOpKind::DeleteDir => Ok(!destination.exists()),
+        WinOpKind::CreateDir => Ok(destination.is_dir()),
+    }
 }
 
 fn preserve_host_conflicts(

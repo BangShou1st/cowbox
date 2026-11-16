@@ -643,3 +643,149 @@ fn log_and_diff_resolve_the_active_session_from_the_workspace() {
     assert_eq!(diff["data"]["session_id"], id);
     assert_eq!(diff["data"]["changes"][0]["rel_path"], "a.txt");
 }
+
+#[test]
+fn crash_after_operation_before_journal_accounting_is_recovered() {
+    let fx = Fixture::new();
+    write(&fx.workspace.join("a.txt"), "A0");
+    write(&fx.workspace.join("b.txt"), "B0");
+    let (id, managed) = fx.init();
+    write(&managed.join("a.txt"), "A1");
+    write(&managed.join("b.txt"), "B1");
+    checkpoint(&fx, &id);
+
+    let output = fx
+        .command()
+        .env("COWBOX_WIN_FAULT", "abort-after-operation:1")
+        .args([
+            "win",
+            "commit",
+            "--session",
+            &id,
+            "--state-root",
+            &state_args(&fx),
+            "--yes",
+            "--json",
+        ])
+        .output()
+        .expect("commit");
+    assert_eq!(output.status.code(), Some(70));
+    assert_eq!(read(&fx.workspace.join("a.txt")), "A1");
+    assert_eq!(read(&fx.workspace.join("b.txt")), "B0");
+
+    let (code, value) = recover(&fx, &id);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(read(&fx.workspace.join("a.txt")), "A0");
+    assert_eq!(read(&fx.workspace.join("b.txt")), "B0");
+}
+
+#[test]
+fn crash_after_delete_before_journal_accounting_restores_the_deleted_file() {
+    let fx = Fixture::new();
+    write(&fx.workspace.join("a.txt"), "A0");
+    write(&fx.workspace.join("b.txt"), "B0");
+    let (id, managed) = fx.init();
+    fs::remove_file(managed.join("a.txt")).expect("delete managed a");
+    write(&managed.join("b.txt"), "B1");
+    checkpoint(&fx, &id);
+
+    let output = fx
+        .command()
+        .env("COWBOX_WIN_FAULT", "abort-after-operation:1")
+        .args([
+            "win",
+            "commit",
+            "--session",
+            &id,
+            "--state-root",
+            &state_args(&fx),
+            "--yes",
+            "--json",
+        ])
+        .output()
+        .expect("commit");
+    assert_eq!(output.status.code(), Some(70));
+    assert!(!fx.workspace.join("a.txt").exists());
+    assert_eq!(read(&fx.workspace.join("b.txt")), "B0");
+
+    let (code, value) = recover(&fx, &id);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(read(&fx.workspace.join("a.txt")), "A0");
+    assert_eq!(read(&fx.workspace.join("b.txt")), "B0");
+}
+
+#[test]
+#[allow(clippy::permissions_set_readonly_false)]
+fn busy_readonly_file_keeps_its_attribute_after_refused_commit() {
+    let fx = Fixture::new();
+    write(&fx.workspace.join("a.txt"), "A0");
+    let host = fx.workspace.join("a.txt");
+    let mut permissions = fs::metadata(&host).expect("metadata").permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&host, permissions).expect("readonly");
+    let (id, managed) = fx.init();
+    let managed_file = managed.join("a.txt");
+    let mut permissions = fs::metadata(&managed_file)
+        .expect("managed metadata")
+        .permissions();
+    permissions.set_readonly(false);
+    fs::set_permissions(&managed_file, permissions).expect("writable");
+    write(&managed_file, "A1");
+    let mut permissions = fs::metadata(&managed_file)
+        .expect("managed metadata")
+        .permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&managed_file, permissions).expect("readonly");
+    checkpoint(&fx, &id);
+
+    let handle = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(&host)
+        .expect("hold file");
+    let (code, value) = commit(&fx, &id, &[]);
+    assert_ne!(code, 0);
+    assert_eq!(value["error"]["code"], "WIN_FILE_BUSY");
+    assert_eq!(read(&host), "A0");
+    assert!(
+        fs::metadata(&host)
+            .expect("host metadata")
+            .permissions()
+            .readonly(),
+        "a failed busy replacement must restore the host read-only attribute"
+    );
+    drop(handle);
+}
+
+#[test]
+fn file_and_directory_swaps_commit_in_both_directions() {
+    let fx = Fixture::new();
+    write(&fx.workspace.join("file-to-dir"), "old-file");
+    write(&fx.workspace.join("dir-to-file/old.txt"), "old-dir");
+    let (id, managed) = fx.init();
+    fs::remove_file(managed.join("file-to-dir")).expect("remove file");
+    write(&managed.join("file-to-dir/new.txt"), "new-dir");
+    fs::remove_dir_all(managed.join("dir-to-file")).expect("remove dir");
+    write(&managed.join("dir-to-file"), "new-file");
+    checkpoint(&fx, &id);
+
+    let (code, preview) = fx.run(&[
+        "win",
+        "commit",
+        "--session",
+        &id,
+        "--state-root",
+        &state_args(&fx),
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{preview}");
+    assert_eq!(preview["data"]["can_commit"], true);
+
+    let (code, value) = commit(&fx, &id, &[]);
+    assert_eq!(code, 0, "{value}");
+    assert!(fx.workspace.join("file-to-dir").is_dir());
+    assert_eq!(read(&fx.workspace.join("file-to-dir/new.txt")), "new-dir");
+    assert!(fx.workspace.join("dir-to-file").is_file());
+    assert_eq!(read(&fx.workspace.join("dir-to-file")), "new-file");
+}

@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.1-m4] - 2026-11-16
+
+### Fixed
+
+- Windows commit journals now persist the active operation before mutating the
+  host. Recovery restores an operation whose bytes were written but whose
+  `applied_ops` counter was not persisted before a crash.
+- A failed replacement of a busy read-only host file restores the read-only
+  attribute instead of leaving the file writable.
+- File-to-directory and directory-to-file changes no longer back up the
+  opposite node type during preparation. The delete/create/write ordering now
+  matches the preview and commits both directions.
+- Recovery uses the target object hash, backups, and current node type to
+  decide whether each operation was actually applied, making interrupted
+  recovery idempotent for writes, deletes, and directory creation.
+
+### Tests
+
+- Added Windows regressions for unaccounted writes, unaccounted deletes,
+  busy read-only files, and both file/directory swap directions. The native
+  suite now has 18 tests.
+
 ## [0.7.0-m4] - 2026-11-16
 
 ### Added
