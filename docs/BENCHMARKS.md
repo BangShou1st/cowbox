@@ -1217,7 +1217,7 @@ workflow. The acceptance debug binary SHA-256 was
 | --- | --- |
 | `cargo fmt --check` | passed |
 | workspace Clippy with `-D warnings` | passed |
-| `cargo test --workspace` | 126 passed |
+| `cargo test --workspace` | 128 passed |
 | forced-sandbox `adversarial_suite` | 39 passed, 0 failed, sequentially |
 | `bash scripts/smoke.sh` | passed |
 | network IPv4/IPv6 TCP/UDP host/off matrix | passed |
