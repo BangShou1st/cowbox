@@ -4,7 +4,6 @@ use super::mount;
 use super::spec::{ExecResult, RunSpec, load_spec, write_result};
 use crate::error::{CoreError, Result};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
-use rustix::io::Errno;
 use rustix::process::{Pid, PidfdFlags, Signal, WaitOptions, kill_process, pidfd_open, waitpid};
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
@@ -109,30 +108,28 @@ fn wait_for_command_with_pidfd(
     started: Instant,
 ) -> Result<(ExitStatus, bool)> {
     let mut poll_fd = PollFd::new(pidfd, PollFlags::IN);
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok((status, false));
-        }
-        let remaining = limit.saturating_sub(started.elapsed());
-        let poll_timeout = Timespec::try_from(remaining).map_err(|_| {
-            CoreError::IsolationFailed("command timeout cannot be represented by poll".to_string())
-        })?;
-        match poll(std::slice::from_mut(&mut poll_fd), Some(&poll_timeout)) {
-            Ok(0) => {
-                if let Some(status) = child.try_wait()? {
-                    return Ok((status, false));
-                }
-                kill_namespace();
-                return Ok((child.wait()?, true));
+    if let Some(status) = child.try_wait()? {
+        return Ok((status, false));
+    }
+    let remaining = limit.saturating_sub(started.elapsed());
+    let Ok(poll_timeout) = Timespec::try_from(remaining) else {
+        return wait_for_command_polling(child, limit, started);
+    };
+    match poll(std::slice::from_mut(&mut poll_fd), Some(&poll_timeout)) {
+        Ok(0) => {
+            if let Some(status) = child.try_wait()? {
+                return Ok((status, false));
             }
-            Ok(_) => return Ok((child.wait()?, false)),
-            Err(Errno::INTR) => poll_fd.clear_revents(),
-            Err(error) => {
-                return Err(CoreError::IsolationFailed(format!(
-                    "waiting for command exit with pidfd failed: {error}"
-                )));
-            }
+            kill_namespace();
+            Ok((child.wait()?, true))
         }
+        Ok(_) => {
+            if let Some(status) = child.try_wait()? {
+                return Ok((status, false));
+            }
+            wait_for_command_polling(child, limit, started)
+        }
+        Err(_) => wait_for_command_polling(child, limit, started),
     }
 }
 

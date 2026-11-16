@@ -530,22 +530,25 @@ The earlier experiment remains the historical source for two ideas:
 - wait for command exit with a pidfd instead of a fixed 10 ms poll.
 
 The production integration additionally keeps a polling fallback when pidfd
-creation is unavailable and checks the direct child again after a poll timeout
-before deciding that the command timed out. The manifest path retains complete
-tree coverage, global path ordering, no-follow symlink handling, xattr digests,
-hardlink metadata, and JSONL compatibility. The archived `REPORT.md` and
+creation is unavailable, when poll fails, or when an event cannot confirm that
+the direct child has exited. It checks the direct child again after a poll
+timeout before deciding that the command timed out. The manifest path retains
+complete tree coverage, global path ordering, no-follow symlink handling, xattr
+digests, hardlink metadata, and JSONL compatibility. The archived `REPORT.md` and
 `0001-perf-wait-for-command-exit-with-pidfd.patch` remain the context for the
 earlier 46.60/156.65 ms and 46.59/124.07 ms candidate measurements; they are not
 relabeled as this round's results.
 
 The measured candidate source was commit
 `1dd203a4c995bf667d3b0752be1520c56ba9d2b5` plus `source.patch` from the artifact
-directory. The commit containing this section records the same source. Raw
+directory. Commit `bb3b150090bfdec47385394beb05567f442a60df` records that
+source. A later pidfd boundary fix changes only poll-error and non-exit-event
+fallback handling; it leaves the measured normal-exit path unchanged. Raw
 results, logs, binaries, and the exact patch are retained in
 `/home/bangshou/cowbox-bench-results/m2-final-20261116T010646Z/`.
-The three implementation commits are `c7e4b83` for Windows doctor forwarding,
-`1dd203a` for the supervisor wait, and the commit containing this section for
-the manifest integration and final measurements.
+The measured implementation commits are `c7e4b83` for Windows doctor
+forwarding, `1dd203a` for the supervisor wait, and `bb3b150` for the manifest
+integration and final measurements.
 
 | Artifact | SHA-256 |
 | --- | --- |
