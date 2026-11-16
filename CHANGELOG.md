@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0-m2] - 2026-11-16
+
+### Added
+
+- Reproducible M2 CLI wall-clock harness for 10k/200k-file sessions, fixed
+  shallow runs, 10-file diffs, layer-depth scaling, and the layer-limit
+  boundary. The first measured M2 results and rerun protocol are recorded in
+  `docs/BENCHMARKS.md`.
+- An adversarial regression fixture covering non-empty `user.*` xattrs,
+  hardlink identity and link count, no-follow symlink targets, xattr-only diff
+  detection, and host-drift commit refusal.
+
+### Changed
+
+- First-session base-manifest capture now schedules directory tasks in
+  parallel, uses no-follow directory-entry metadata, serializes JSONL in the
+  workers, and pipelines buffered writes. The JSONL schema remains compatible
+  with old manifests; deterministic line ordering remains globally path-sorted.
+- Empty user-xattr sets reuse the known SHA-256 digest instead of hashing an
+  empty byte stream for every file and directory.
+- Windows `doctor` now preserves the Linux diagnostic JSON and human-readable
+  capability report when launched through the WSL bridge.
+
 ## [0.3.0-m1] - 2026-11-15
 
 ### Added
@@ -95,5 +118,6 @@ All notable changes to this project are documented here. The format follows
   read-only during a session.
 - Hardlinks and xattrs are not preserved on commit in M1.
 
+[0.4.0-m2]: https://github.com/BangShou1st/cowbox/releases/tag/v0.4.0-m2
 [0.3.0-m1]: https://github.com/BangShou1st/cowbox/releases/tag/v0.3.0-m1
 [0.1.0-m1]: https://github.com/BangShou1st/cowbox/releases/tag/v0.1.0-m1

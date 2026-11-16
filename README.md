@@ -237,18 +237,23 @@ See [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md) for the full threat model.
 We only publish numbers that were measured on a real machine. The harness and
 methodology live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-| Scenario | Fixture | Target | Measured (Criterion mean) |
-| --- | --- | --- | --- |
-| Cold OverlayFS mount | 10,000 files | < 5 ms | TBD (pure mount not separately instrumented) |
-| Step freeze | 10,000 files | < 10 ms | TBD (pure freeze not separately instrumented) |
-| Diff scan (10 changed files) | 10,000 files | < 25 ms | 13.19 ms (12.96–13.56 ms) |
-| Rollback (DAG pointer) | 10,000 files | < 5 ms | 10.7 ns (10.44–11.01 ns) |
-| End-to-end `cowbox run -- true` | 10,000 files | no hard target | 56.2 ms (51.76–60.88 ms, includes CLI/namespace/mount) |
+The completed M2 round compared the `v0.3.0-m1` release baseline with the
+optimized candidate on WSL2 ext4, using 20 samples per scenario, one excluded
+warm-up, and a fresh session for every sample.
 
-These are targets, not claims. The measured column is filled after
-`scripts/bench.sh` runs in WSL2 ext4.
+| Scenario | 10,000 files | 200,000 files |
+| --- | ---: | ---: |
+| First `cowbox run -- true` (includes manifest capture) | 43.29 ms | 163.14 ms |
+| Subsequent run with 1 parent layer | 38.43 ms | 38.55 ms |
+| `cowbox diff` with 10 changed files | 24.71 ms | 388.55 ms |
 
-M1 reports Criterion means and ranges; P99 is not separately instrumented yet.
+Values are medians of complete CLI wall-clock durations. A 10,000-file step with
+150 parents is accepted, and the next step is rejected with `CONFIG_ERROR`.
+
+See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for full statistics, fixtures,
+machine details, caveats, and the exact rerun command. First-run P95 measured
+47.235 ms at 10,000 files and 166.94 ms at 200,000 files. P99 is not separately
+instrumented yet.
 
 ## Status and roadmap
 
@@ -256,7 +261,7 @@ M1 reports Criterion means and ranges; P99 is not separately instrumented yet.
 | --- | --- | --- |
 | **M1** | Linux/WSL2 CLI, snapshot DAG, OverlayFS, Landlock, commit journal, tests, benchmarks | Preview available |
 | **M1.5** | Windows launcher, `setup`, multi-harness skill installer, project rules and policy | Preview available |
-| **M2** | Network policy (seccomp or newer Landlock), cache bind mounts, 200k-file benchmarks, blocked-write auditing | Planned |
+| **M2** | Network policy (seccomp or newer Landlock), cache bind mounts, 200k-file benchmarks, blocked-write auditing | In progress |
 | **M3** | MCP proxy with `cowbox_diff` / `cowbox_rollback` / `cowbox_commit` meta-tools | Planned |
 | **M4** | Native Windows ReFS + Job Object backend, macOS backend, eval suite and public leaderboard | Planned |
 

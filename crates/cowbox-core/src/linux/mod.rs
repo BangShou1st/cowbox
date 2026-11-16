@@ -69,7 +69,7 @@ impl SandboxBackend for LinuxBackend {
         fs::create_dir_all(layout.home_dir())?;
         fs::create_dir_all(layout.tmp_dir())?;
         fs::create_dir_all(layout.cache_dir())?;
-        manifest::capture_base_manifest(repo_root, &layout.base_manifest_path())?;
+        manifest::capture_base_manifest_file(repo_root, &layout.base_manifest_path())?;
         Ok(())
     }
 

@@ -35,6 +35,11 @@ cowbox commit
 `cowbox.exe` calls `wsl.exe --cd <cwd>`, so the project is visible as
 `/mnt/e/project/your-app` inside WSL. State remains on WSL ext4.
 
+`cowbox doctor` forwards the Linux capability report. A machine that is reachable
+but not ready exits 1, prints every failed capability and note, and keeps the
+same JSON envelope under `--json`. WSL startup failures that produce no doctor
+response are reported separately as `WSL_START_FAILED`.
+
 ## Agent skill
 
 The setup is intentionally two-step:

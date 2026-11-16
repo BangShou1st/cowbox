@@ -1,8 +1,9 @@
 use assert_cmd::Command;
 use rusqlite::Connection;
+use rustix::fs::XattrFlags;
 use serde_json::Value;
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
@@ -128,6 +129,18 @@ fn symlink_count(root: &Path) -> usize {
     shell_output(root, "find . -type l | wc -l")
         .parse()
         .expect("symlink count")
+}
+
+fn set_user_xattr(path: &Path, name: &str, value: &[u8]) {
+    rustix::fs::setxattr(path, name, value, XattrFlags::empty()).expect("set user xattr");
+}
+
+fn user_xattr(path: &Path, name: &str) -> Vec<u8> {
+    let size = rustix::fs::lgetxattr_query(path, name).expect("query user xattr");
+    let mut value = vec![0u8; size];
+    let read = rustix::fs::lgetxattr(path, name, &mut value[..]).expect("read user xattr");
+    value.truncate(read);
+    value
 }
 
 fn create_sqlite(path: &Path) {
@@ -280,11 +293,13 @@ fn doctor_reports_linux_sandbox_capabilities() {
     assert_ok(&value, "doctor");
     assert_eq!(value["data"]["ready"].as_bool(), Some(true));
     assert_eq!(value["data"]["capabilities"]["os"].as_str(), Some("linux"));
-    assert!(
-        value["data"]["capabilities"]["landlock_abi"]
-            .as_i64()
-            .unwrap_or(0)
-            >= 3
+    assert_eq!(
+        value["data"]["capabilities"]["landlock_abi"].as_i64(),
+        Some(3)
+    );
+    assert_eq!(
+        value["data"]["capabilities"]["state_fs"].as_str(),
+        Some("ext4")
     );
 }
 
@@ -1035,6 +1050,171 @@ fn commit_refuses_host_drift_but_force_writes_with_a_journal() {
     );
     let journal = forced["data"]["journal"].as_str().expect("journal path");
     assert!(Path::new(journal).join("ops.json").exists());
+}
+
+#[test]
+fn manifest_captures_xattrs_hardlinks_symlinks_and_rejects_host_drift() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    let payload = env.workspace.path().join("payload.txt");
+    let hardlink = env.workspace.path().join("hard.txt");
+    let symlink_path = env.workspace.path().join("link");
+    fs::write(&payload, "base\n").expect("payload");
+    fs::hard_link(&payload, &hardlink).expect("hardlink fixture");
+    symlink("payload.txt", &symlink_path).expect("symlink fixture");
+    set_user_xattr(&payload, "user.cowbox.fixture", b"base");
+    env.init();
+
+    let (code, run) = env.json(&["run", "--json", "--", "true"]);
+    assert_eq!(code, 0, "initial run failed: {run}");
+    let (code, log) = env.json(&["log", "--json"]);
+    assert_eq!(code, 0, "log failed: {log}");
+    let session_id = log["data"]["dag"]["session_id"]
+        .as_str()
+        .expect("session id");
+    let manifest = fs::read_to_string(
+        session_dir(&env, session_id)
+            .join("base")
+            .join("manifest.jsonl"),
+    )
+    .expect("base manifest");
+    let entries = manifest
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("manifest entry"))
+        .collect::<Vec<_>>();
+    let entry = |path: &str| {
+        entries
+            .iter()
+            .find(|entry| entry["rel_path"].as_str() == Some(path))
+            .unwrap_or_else(|| panic!("missing manifest entry {path}: {entries:?}"))
+    };
+    let payload_entry = entry("payload.txt");
+    let hardlink_entry = entry("hard.txt");
+    assert_eq!(payload_entry["dev"], hardlink_entry["dev"]);
+    assert_eq!(payload_entry["ino"], hardlink_entry["ino"]);
+    assert_eq!(payload_entry["nlink"].as_u64(), Some(2));
+    assert_eq!(
+        payload_entry["xattr_digest"],
+        hardlink_entry["xattr_digest"]
+    );
+    assert!(payload_entry["xattr_digest"].is_string());
+    assert_eq!(entry("link")["kind"].as_str(), Some("symlink"));
+    assert_eq!(
+        entry("link")["symlink_target"].as_str(),
+        Some("payload.txt")
+    );
+
+    let (code, changed) = run_script(
+        &env,
+        "python3 -c \"import os; os.setxattr('payload.txt', 'user.cowbox.fixture', b'sandbox')\"",
+    );
+    assert_eq!(code, 0, "xattr run failed: {changed}");
+    assert_eq!(user_xattr(&payload, "user.cowbox.fixture"), b"base");
+    assert_eq!(user_xattr(&hardlink, "user.cowbox.fixture"), b"base");
+    let (code, diff) = env.json(&["diff", "--json"]);
+    assert_eq!(code, 0, "diff failed: {diff}");
+    assert!(
+        diff["data"]["changes"]
+            .as_array()
+            .expect("diff changes")
+            .iter()
+            .any(|change| {
+                change["rel_path"].as_str() == Some("payload.txt")
+                    && change["kind"].as_str() == Some("modified")
+            }),
+        "xattr-only sandbox change was not detected: {diff}"
+    );
+
+    set_user_xattr(&payload, "user.cowbox.fixture", b"host-drift");
+    fs::hard_link(&payload, env.workspace.path().join("extra.txt")).expect("host link drift");
+    let (code, conflict) = env.json(&["commit", "--yes", "--json"]);
+    assert_eq!(code, 2, "host drift was not refused: {conflict}");
+    assert_eq!(conflict["error"]["code"].as_str(), Some("COMMIT_CONFLICT"));
+    assert_eq!(user_xattr(&payload, "user.cowbox.fixture"), b"host-drift");
+    assert_eq!(fs::metadata(&payload).expect("payload metadata").nlink(), 3);
+    assert_eq!(
+        fs::read_link(&symlink_path).expect("symlink target"),
+        Path::new("payload.txt")
+    );
+}
+
+#[test]
+fn first_run_captures_existing_files_across_wide_deep_tree_before_command() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    let outside = env.state.path().join("outside-target");
+    fs::create_dir_all(&outside).expect("outside target");
+    fs::write(outside.join("not-in-workspace.txt"), "outside\n").expect("outside file");
+    for branch in 0..40 {
+        let path = env.workspace.path().join(format!(
+            "branches/branch-{branch:02}/deep/nested/payload.txt"
+        ));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("deep directory");
+        }
+        fs::write(path, format!("branch {branch}\n")).expect("deep file");
+    }
+    symlink(&outside, env.workspace.path().join("outside-link")).expect("directory symlink");
+    env.init();
+
+    let (code, run) = run_script(
+        &env,
+        "printf 'sandbox changed\\n' > branches/branch-00/deep/nested/payload.txt",
+    );
+    assert_eq!(code, 0, "first run failed: {run}");
+    let (code, log) = env.json(&["log", "--json"]);
+    assert_eq!(code, 0, "log failed: {log}");
+    let session_id = log["data"]["dag"]["session_id"]
+        .as_str()
+        .expect("session id");
+    let manifest = fs::read_to_string(
+        session_dir(&env, session_id)
+            .join("base")
+            .join("manifest.jsonl"),
+    )
+    .expect("base manifest");
+    let entries = manifest
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("manifest entry"))
+        .collect::<Vec<_>>();
+    for branch in 0..40 {
+        let rel_path = format!("branches/branch-{branch:02}/deep/nested/payload.txt");
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry["rel_path"].as_str() == Some(&rel_path)),
+            "missing deep manifest entry {rel_path}"
+        );
+    }
+    assert!(entries.iter().any(|entry| {
+        entry["rel_path"].as_str() == Some("outside-link")
+            && entry["kind"].as_str() == Some("symlink")
+            && entry["symlink_target"].as_str() == outside.to_str()
+    }));
+    assert!(
+        !entries.iter().any(|entry| entry["rel_path"]
+            .as_str()
+            .is_some_and(|path| path.starts_with("outside-link/"))),
+        "manifest followed the directory symlink"
+    );
+
+    let (code, diff) = env.json(&["diff", "--json"]);
+    assert_eq!(code, 0, "diff failed: {diff}");
+    assert!(
+        diff["data"]["changes"]
+            .as_array()
+            .expect("diff changes")
+            .iter()
+            .any(|change| {
+                change["rel_path"].as_str() == Some("branches/branch-00/deep/nested/payload.txt")
+                    && change["kind"].as_str() == Some("modified")
+            }),
+        "first command change was not compared with its base manifest entry: {diff}"
+    );
 }
 
 #[test]

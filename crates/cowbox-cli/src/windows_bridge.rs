@@ -2,9 +2,13 @@ use crate::agent::config::{WslConfig, load_global};
 use crate::cli::{CliCommand, DoctorArgs, PathArgs};
 use crate::error::{CliError, CliResult};
 use crate::json;
+use crate::render;
 use crate::setup;
+use cowbox_core::Capabilities;
+use serde::Deserialize;
 use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub fn delegate_if_needed(command: &CliCommand) -> Option<CliResult<i32>> {
@@ -72,7 +76,7 @@ fn delegate(command: &CliCommand) -> CliResult<i32> {
         .hint("run `cowbox setup` first")
     })?;
     std::io::stdout().write_all(&output.stdout)?;
-    let stderr = decode_wsl_stderr(&output.stderr);
+    let stderr = decode_wsl_text(&output.stderr);
     if !stderr.is_empty() {
         std::io::stderr().write_all(stderr.as_bytes())?;
     }
@@ -131,24 +135,132 @@ pub fn doctor(args: &DoctorArgs) -> CliResult<i32> {
         .map_err(|error| {
             CliError::new("WSL_NOT_FOUND", format!("cannot run WSL doctor: {error}"))
         })?;
-    if args.json {
-        std::io::stdout().write_all(&output.stdout)?;
-    } else if output.status.success() {
-        let text = String::from_utf8_lossy(&output.stdout);
-        println!("Windows bridge: WSL distro {distro}");
-        println!("{text}");
-    } else {
-        let error = decode_wsl_stderr(&output.stderr);
-        return Err(CliError::new(
-            "DOCTOR_FAILED",
-            if error.is_empty() {
-                "WSL doctor failed".to_string()
+    let response = parse_doctor_response(&output.stdout);
+    match response {
+        Ok(DoctorResponse::Report(report)) => {
+            if args.json {
+                std::io::stdout().write_all(&output.stdout)?;
             } else {
-                error
-            },
-        ));
+                println!("Windows bridge: WSL distro {distro}");
+                render::print_doctor(
+                    &report.capabilities,
+                    report.state_root.as_deref().unwrap_or(Path::new("unknown")),
+                    report.ready,
+                );
+            }
+            Ok(if report.ready { 0 } else { 1 })
+        }
+        Ok(DoctorResponse::Failure(failure)) => {
+            if args.json {
+                std::io::stdout().write_all(&output.stdout)?;
+                Ok(output.status.code().unwrap_or(failure.exit_code))
+            } else {
+                let mut error = CliError::new(failure.code, failure.message)
+                    .exit(output.status.code().unwrap_or(failure.exit_code));
+                if let Some(hint) = failure.hint {
+                    error = error.hint(hint);
+                }
+                Err(error)
+            }
+        }
+        Err(reason) => {
+            let stderr = decode_wsl_text(&output.stderr);
+            let stdout = decode_wsl_text(&output.stdout);
+            let detail = if !stderr.trim().is_empty() {
+                stderr.trim().to_string()
+            } else if !stdout.trim().is_empty() {
+                stdout.trim().to_string()
+            } else {
+                reason
+            };
+            let code = if output.status.success() {
+                "DOCTOR_INVALID"
+            } else {
+                "WSL_START_FAILED"
+            };
+            Err(CliError::new(
+                code,
+                format!(
+                    "WSL distro {distro} did not return a usable cowbox doctor response: {detail}"
+                ),
+            ))
+        }
     }
-    Ok(if output.status.success() { 0 } else { 1 })
+}
+
+#[derive(Debug, Deserialize)]
+struct DoctorReport {
+    ready: bool,
+    capabilities: Capabilities,
+    #[serde(default)]
+    state_root: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+enum DoctorResponse {
+    Report(DoctorReport),
+    Failure(DoctorFailure),
+}
+
+#[derive(Debug)]
+struct DoctorFailure {
+    code: String,
+    message: String,
+    hint: Option<String>,
+    exit_code: i32,
+}
+
+fn parse_doctor_response(bytes: &[u8]) -> Result<DoctorResponse, String> {
+    let envelope: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|error| format!("invalid JSON ({error})"))?;
+    if envelope["command"].as_str() != Some("doctor") {
+        return Err("JSON envelope is not a doctor response".to_string());
+    }
+    match envelope["ok"].as_bool() {
+        Some(true) => {
+            let data = envelope
+                .get("data")
+                .ok_or_else(|| "doctor response is missing data".to_string())?;
+            let ready = data["ready"]
+                .as_bool()
+                .ok_or_else(|| "doctor response is missing data.ready".to_string())?;
+            let capabilities = serde_json::from_value(
+                data.get("capabilities")
+                    .cloned()
+                    .ok_or_else(|| "doctor response is missing data.capabilities".to_string())?,
+            )
+            .map_err(|error| format!("invalid data.capabilities ({error})"))?;
+            let state_root = data
+                .get("state_root")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| format!("invalid data.state_root ({error})"))?;
+            Ok(DoctorResponse::Report(DoctorReport {
+                ready,
+                capabilities,
+                state_root,
+            }))
+        }
+        Some(false) => {
+            let error = envelope
+                .get("error")
+                .ok_or_else(|| "doctor error response is missing error".to_string())?;
+            Ok(DoctorResponse::Failure(DoctorFailure {
+                code: error["code"]
+                    .as_str()
+                    .unwrap_or("DOCTOR_FAILED")
+                    .to_string(),
+                message: error["message"]
+                    .as_str()
+                    .unwrap_or("cowbox doctor failed")
+                    .to_string(),
+                hint: error["hint"].as_str().map(ToString::to_string),
+                exit_code: error["exit_code"].as_i64().map_or(1, |code| code as i32),
+            }))
+        }
+        None => Err("JSON envelope is missing a boolean ok field".to_string()),
+    }
 }
 
 pub fn path(args: &PathArgs) -> CliResult<i32> {
@@ -165,7 +277,7 @@ pub fn path(args: &PathArgs) -> CliResult<i32> {
     Ok(0)
 }
 
-fn decode_wsl_stderr(bytes: &[u8]) -> String {
+fn decode_wsl_text(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0xFF, 0xFE]) {
         let mut units = Vec::new();
         for chunk in bytes[2..].chunks_exact(2) {
@@ -196,12 +308,84 @@ mod tests {
         for unit in "WSL error".encode_utf16() {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
-        assert_eq!(decode_wsl_stderr(&bytes), "WSL error");
+        assert_eq!(decode_wsl_text(&bytes), "WSL error");
     }
 
     #[test]
     fn maps_windows_drive_path_to_mnt() {
         let mapped = setup::windows_path_to_wsl(Path::new(r"E:\project\cowbox")).expect("path");
         assert_eq!(mapped, Path::new("/mnt/e/project/cowbox"));
+    }
+
+    #[test]
+    fn parses_a_nonzero_capability_report() {
+        let response = parse_doctor_response(
+            br#"{
+                "schema_version": 1,
+                "ok": true,
+                "command": "doctor",
+                "session": null,
+                "data": {
+                    "ready": false,
+                    "capabilities": {
+                        "os": "linux",
+                        "kernel": "6.6.0",
+                        "wsl": true,
+                        "user_namespace": true,
+                        "overlayfs": true,
+                        "userxattr": true,
+                        "landlock_abi": 3,
+                        "whiteout_kind": "char_device",
+                        "state_fs": "9p",
+                        "notes": ["set COWBOX_HOME to WSL ext4"]
+                    },
+                    "state_root": "/mnt/e/cowbox-state"
+                }
+            }"#,
+        )
+        .expect("parse doctor report");
+        let DoctorResponse::Report(report) = response else {
+            panic!("expected capability report");
+        };
+        assert!(!report.ready);
+        assert_eq!(report.capabilities.state_fs.as_deref(), Some("9p"));
+        assert_eq!(
+            report.state_root.as_deref(),
+            Some(Path::new("/mnt/e/cowbox-state"))
+        );
+    }
+
+    #[test]
+    fn parses_a_structured_doctor_error() {
+        let response = parse_doctor_response(
+            br#"{
+                "schema_version": 1,
+                "ok": false,
+                "command": "doctor",
+                "error": {
+                    "code": "STATE_ROOT",
+                    "message": "invalid state root",
+                    "hint": "choose ext4",
+                    "exit_code": 2
+                }
+            }"#,
+        )
+        .expect("parse doctor error");
+        let DoctorResponse::Failure(failure) = response else {
+            panic!("expected doctor failure");
+        };
+        assert_eq!(failure.code, "STATE_ROOT");
+        assert_eq!(failure.exit_code, 2);
+        assert_eq!(failure.hint.as_deref(), Some("choose ext4"));
+    }
+
+    #[test]
+    fn rejects_a_wsl_error_without_a_doctor_envelope() {
+        let error = parse_doctor_response(b"").expect_err("empty output is not a report");
+        assert!(error.contains("invalid JSON"));
+
+        let error =
+            parse_doctor_response(br#"{"ok":true,"command":"diff","data":{}}"#).expect_err("diff");
+        assert!(error.contains("not a doctor response"));
     }
 }

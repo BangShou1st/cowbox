@@ -1,8 +1,7 @@
+use crate::doctor;
 use crate::state::SessionRecord;
-#[cfg(not(windows))]
 use cowbox_core::Capabilities;
 use cowbox_core::{ChangeKind, EntryKind, FileChange};
-#[cfg(not(windows))]
 use std::path::Path;
 
 #[derive(Debug, Default)]
@@ -194,7 +193,6 @@ pub fn print_stats(stats: &Stats) {
     );
 }
 
-#[cfg(not(windows))]
 pub fn print_doctor(capabilities: &Capabilities, state_root: &Path, ready: bool) {
     println!("cowbox doctor ({})", env!("CARGO_PKG_VERSION"));
     println!("State root: {}", state_root.display());
@@ -243,10 +241,10 @@ pub fn print_doctor(capabilities: &Capabilities, state_root: &Path, ready: bool)
     );
     line(
         "Landlock",
-        capabilities.landlock_abi.is_some(),
+        doctor::landlock_ready(capabilities),
         &capabilities
             .landlock_abi
-            .map(|abi| format!("ABI {abi}"))
+            .map(|abi| format!("ABI {abi} (ABI 3 required)"))
             .unwrap_or_else(|| "unavailable".to_string()),
     );
     line(
@@ -254,10 +252,16 @@ pub fn print_doctor(capabilities: &Capabilities, state_root: &Path, ready: bool)
         capabilities.whiteout_kind != cowbox_core::WhiteoutKind::Unknown,
         &format!("{:?}", capabilities.whiteout_kind),
     );
+    let state_fs = capabilities.state_fs.as_deref().unwrap_or("unknown");
+    let state_detail = if state_fs == "9p" {
+        "9p (COWBOX_HOME requires an xattr-capable Linux filesystem; WSL ext4 is recommended)"
+    } else {
+        state_fs
+    };
     line(
         "State filesystem",
-        capabilities.state_fs.is_some(),
-        capabilities.state_fs.as_deref().unwrap_or("unknown"),
+        doctor::state_fs_ready(capabilities),
+        state_detail,
     );
     for note in &capabilities.notes {
         println!("  note: {note}");
@@ -273,7 +277,6 @@ pub fn print_doctor(capabilities: &Capabilities, state_root: &Path, ready: bool)
     );
 }
 
-#[cfg(not(windows))]
 fn line(label: &str, ok: bool, detail: &str) {
     println!("[{}] {label}: {detail}", if ok { "ok" } else { "!!" });
 }

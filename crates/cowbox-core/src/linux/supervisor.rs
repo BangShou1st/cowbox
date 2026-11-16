@@ -3,10 +3,11 @@ use super::landlock;
 use super::mount;
 use super::spec::{ExecResult, RunSpec, load_spec, write_result};
 use crate::error::{CoreError, Result};
-use rustix::process::{Pid, Signal, WaitOptions, kill_process, waitpid};
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::process::{Pid, PidfdFlags, Signal, WaitOptions, kill_process, pidfd_open, waitpid};
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -59,26 +60,15 @@ fn run_supervisor(spec: &RunSpec, started: Instant) -> Result<ExecResult> {
     })?;
 
     let timeout = spec.timeout_ms.map(Duration::from_millis);
-    let mut timed_out = false;
-    let exit_code;
-    let mut signal = None;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            exit_code = status
-                .code()
-                .unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
-            signal = status.signal();
-            break;
-        }
-        if timeout.is_some_and(|limit| started.elapsed() > limit) {
-            timed_out = true;
-            exit_code = 124;
-            kill_namespace();
-            let _ = child.wait();
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
+    let (status, timed_out) = wait_for_command(&mut child, timeout, started)?;
+    let exit_code = if timed_out {
+        124
+    } else {
+        status
+            .code()
+            .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+    };
+    let signal = if timed_out { None } else { status.signal() };
 
     let survivors = namespace_pids();
     let orphans_reaped = survivors.len();
@@ -95,6 +85,72 @@ fn run_supervisor(spec: &RunSpec, started: Instant) -> Result<ExecResult> {
         timed_out,
         error: None,
     })
+}
+
+fn wait_for_command(
+    child: &mut std::process::Child,
+    timeout: Option<Duration>,
+    started: Instant,
+) -> Result<(ExitStatus, bool)> {
+    let Some(limit) = timeout else {
+        return Ok((child.wait()?, false));
+    };
+    match pidfd_open(Pid::from_child(child), PidfdFlags::empty()) {
+        Ok(pidfd) => wait_for_command_with_pidfd(child, &pidfd, limit, started),
+        Err(_) => wait_for_command_polling(child, limit, started),
+    }
+}
+
+fn wait_for_command_with_pidfd(
+    child: &mut std::process::Child,
+    pidfd: &rustix::fd::OwnedFd,
+    limit: Duration,
+    started: Instant,
+) -> Result<(ExitStatus, bool)> {
+    let mut poll_fd = PollFd::new(pidfd, PollFlags::IN);
+    if let Some(status) = child.try_wait()? {
+        return Ok((status, false));
+    }
+    let remaining = limit.saturating_sub(started.elapsed());
+    let Ok(poll_timeout) = Timespec::try_from(remaining) else {
+        return wait_for_command_polling(child, limit, started);
+    };
+    match poll(std::slice::from_mut(&mut poll_fd), Some(&poll_timeout)) {
+        Ok(0) => {
+            if let Some(status) = child.try_wait()? {
+                return Ok((status, false));
+            }
+            kill_namespace();
+            Ok((child.wait()?, true))
+        }
+        Ok(_) => {
+            if let Some(status) = child.try_wait()? {
+                return Ok((status, false));
+            }
+            wait_for_command_polling(child, limit, started)
+        }
+        Err(_) => wait_for_command_polling(child, limit, started),
+    }
+}
+
+fn wait_for_command_polling(
+    child: &mut std::process::Child,
+    limit: Duration,
+    started: Instant,
+) -> Result<(ExitStatus, bool)> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok((status, false));
+        }
+        if started.elapsed() > limit {
+            if let Some(status) = child.try_wait()? {
+                return Ok((status, false));
+            }
+            kill_namespace();
+            return Ok((child.wait()?, true));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn namespace_pids() -> Vec<i32> {
@@ -118,4 +174,53 @@ fn kill_namespace() {
 
 fn reap_children() {
     while let Ok(Some(_)) = waitpid(None, WaitOptions::NOHANG) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_wait_without_timeout_preserves_exit_code() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .spawn()
+            .expect("spawn test command");
+
+        let (status, timed_out) =
+            wait_for_command(&mut child, None, Instant::now()).expect("wait for test command");
+
+        assert!(!timed_out);
+        assert_eq!(status.code(), Some(7));
+    }
+
+    #[test]
+    fn command_wait_with_pidfd_preserves_exit_code() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .spawn()
+            .expect("spawn test command");
+
+        let (status, timed_out) =
+            wait_for_command(&mut child, Some(Duration::from_secs(5)), Instant::now())
+                .expect("wait for test command");
+
+        assert!(!timed_out);
+        assert_eq!(status.code(), Some(7));
+    }
+
+    #[test]
+    fn polling_fallback_preserves_exit_code() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .spawn()
+            .expect("spawn test command");
+
+        let (status, timed_out) =
+            wait_for_command_polling(&mut child, Duration::from_secs(5), Instant::now())
+                .expect("poll for test command");
+
+        assert!(!timed_out);
+        assert_eq!(status.code(), Some(7));
+    }
 }

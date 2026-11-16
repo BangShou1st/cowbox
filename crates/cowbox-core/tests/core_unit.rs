@@ -67,8 +67,78 @@ fn manifest_captures_and_skips_vcs_metadata() {
 }
 
 #[test]
+fn manifest_covers_wide_deep_tree_in_path_order_without_following_symlinks() {
+    let (root, layout) = fixture();
+    let outside = root.path().join("outside");
+    write(&outside.join("must-not-be-captured.txt"), "outside\n");
+    for branch in 0..40 {
+        write(
+            &layout.workspace.join(format!(
+                "branches/branch-{branch:02}/deep/nested/payload.txt"
+            )),
+            &format!("branch {branch}\n"),
+        );
+    }
+    write(&layout.workspace.join("z-root.txt"), "root\n");
+    symlink(&outside, layout.workspace.join("outside-link")).expect("directory symlink");
+
+    let entries = manifest::capture_base_manifest(&layout.workspace, &layout.base_manifest_path())
+        .expect("capture manifest");
+    let paths = entries
+        .iter()
+        .map(|entry| entry.rel_path.clone())
+        .collect::<Vec<_>>();
+    let mut sorted_paths = paths.clone();
+    sorted_paths.sort();
+    assert_eq!(paths, sorted_paths, "returned entries were not path-sorted");
+
+    for branch in 0..40 {
+        let rel_path = format!("branches/branch-{branch:02}/deep/nested/payload.txt");
+        let entry = entries
+            .iter()
+            .find(|entry| entry.rel_path == Path::new(&rel_path))
+            .unwrap_or_else(|| panic!("missing wide/deep manifest entry {rel_path}"));
+        assert_eq!(entry.kind, EntryKind::File);
+        assert_eq!(
+            entry.size,
+            format!("branch {branch}\n").len() as u64,
+            "manifest size did not belong to {rel_path}"
+        );
+    }
+    let link = entries
+        .iter()
+        .find(|entry| entry.rel_path == Path::new("outside-link"))
+        .expect("symlink entry");
+    assert_eq!(link.kind, EntryKind::Symlink);
+    assert_eq!(link.symlink_target.as_deref(), Some(outside.as_path()));
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| entry.rel_path != Path::new("outside-link")
+                && entry.rel_path.starts_with("outside-link")),
+        "manifest followed a directory symlink"
+    );
+
+    let manifest_text =
+        fs::read_to_string(layout.base_manifest_path()).expect("persisted manifest");
+    let persisted_paths = manifest_text
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<manifest::ManifestEntry>(line)
+                .expect("manifest line")
+                .rel_path
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        persisted_paths, paths,
+        "JSONL order diverged from the returned manifest"
+    );
+}
+
+#[test]
 fn old_manifest_without_hardlink_or_xattr_fields_still_loads() {
     let (_root, layout) = fixture();
+    write(&layout.workspace.join("old.txt"), "old\n");
     if let Some(parent) = layout.base_manifest_path().parent() {
         fs::create_dir_all(parent).expect("manifest parent");
     }
@@ -83,6 +153,137 @@ fn old_manifest_without_hardlink_or_xattr_fields_still_loads() {
     assert_eq!(entry.ino, None);
     assert_eq!(entry.nlink, None);
     assert_eq!(entry.xattr_digest, None);
+
+    let upper = layout.upper_dir(1);
+    fs::create_dir_all(&upper).expect("upper");
+    write(&upper.join("old.txt"), "new\n");
+    let changes = compute_diff(&layout, &[], &[1], &DiffOptions::default()).expect("old diff");
+    assert!(
+        changes
+            .iter()
+            .any(|change| change.rel_path == Path::new("old.txt")
+                && change.kind == ChangeKind::Modified),
+        "diff did not accept the old manifest schema: {changes:?}"
+    );
+}
+
+#[test]
+fn diff_rejects_a_corrupt_unrelated_manifest_line() {
+    let (_root, layout) = fixture();
+    write(&layout.workspace.join("modified.txt"), "old\n");
+    write(&layout.workspace.join("unrelated.txt"), "unchanged\n");
+    manifest::capture_base_manifest(&layout.workspace, &layout.base_manifest_path())
+        .expect("base manifest");
+    let mut manifest_text = fs::read_to_string(layout.base_manifest_path()).expect("manifest text");
+    manifest_text.push_str(r#"{"rel_path":"unrelated.txt","kind":"file"}"#);
+    manifest_text.push('\n');
+    fs::write(layout.base_manifest_path(), manifest_text).expect("corrupt manifest");
+
+    let upper = layout.upper_dir(1);
+    fs::create_dir_all(&upper).expect("upper");
+    write(&upper.join("modified.txt"), "new\n");
+    let error = compute_diff(&layout, &[], &[1], &DiffOptions::default())
+        .expect_err("corrupt unrelated row must fail");
+    assert!(
+        error.to_string().contains("invalid base manifest line"),
+        "{error}"
+    );
+}
+
+#[test]
+fn diff_filtered_manifest_preserves_removals_types_prefixes_and_line_stats() {
+    let (_root, layout) = fixture();
+    write(&layout.workspace.join("modified.txt"), "old one\nold two\n");
+    write(&layout.workspace.join("delete-dir/child.txt"), "removed\n");
+    write(&layout.workspace.join("opaque/child.txt"), "hidden\n");
+    write(&layout.workspace.join("recreated.txt"), "before\n");
+    write(&layout.workspace.join("prefix"), "prefix\n");
+    write(&layout.workspace.join("prefix-extra/keep.txt"), "keep\n");
+    write(&layout.workspace.join("kind.txt"), "file\n");
+    fs::create_dir_all(layout.workspace.join("becomes-file")).expect("base directory");
+    write(&layout.workspace.join("xattr.txt"), "same\n");
+    set_user_xattr(
+        &layout.workspace.join("xattr.txt"),
+        "user.cowbox.diff",
+        b"old",
+    );
+    manifest::capture_base_manifest(&layout.workspace, &layout.base_manifest_path())
+        .expect("base manifest");
+
+    let first = layout.upper_dir(1);
+    fs::create_dir_all(&first).expect("first upper");
+    write(&first.join("modified.txt"), "new\n");
+    write(&first.join("delete-dir"), "");
+    set_user_xattr(&first.join("delete-dir"), "user.overlay.whiteout", b"y");
+    fs::create_dir_all(first.join("opaque")).expect("opaque directory");
+    set_user_xattr(&first.join("opaque"), "user.overlay.opaque", b"y");
+    write(&first.join("opaque/new.txt"), "visible\n");
+    write(&first.join("recreated.txt"), "");
+    set_user_xattr(&first.join("recreated.txt"), "user.overlay.whiteout", b"y");
+    write(&first.join("prefix"), "");
+    set_user_xattr(&first.join("prefix"), "user.overlay.whiteout", b"y");
+    fs::create_dir_all(first.join("kind.txt")).expect("file to directory");
+    write(&first.join("becomes-file"), "now a file\n");
+    write(&first.join("xattr.txt"), "same\n");
+    set_user_xattr(&first.join("xattr.txt"), "user.cowbox.diff", b"new");
+
+    let second = layout.upper_dir(2);
+    fs::create_dir_all(&second).expect("second upper");
+    write(&second.join("recreated.txt"), "after\n");
+
+    let changes = compute_diff(
+        &layout,
+        &[],
+        &[1, 2],
+        &DiffOptions {
+            line_stats: true,
+            ..Default::default()
+        },
+    )
+    .expect("filtered diff");
+    let by_path = |path: &str| {
+        changes
+            .iter()
+            .find(|change| change.rel_path == Path::new(path))
+            .unwrap_or_else(|| panic!("missing change for {path}: {changes:?}"))
+    };
+
+    let modified = by_path("modified.txt");
+    assert_eq!(modified.kind, ChangeKind::Modified);
+    assert_eq!(modified.lines_added, Some(1));
+    assert_eq!(modified.lines_removed, Some(2));
+    assert_eq!(by_path("delete-dir/child.txt").kind, ChangeKind::Deleted);
+    assert_eq!(by_path("opaque/child.txt").kind, ChangeKind::Deleted);
+    assert_eq!(by_path("opaque/new.txt").kind, ChangeKind::Added);
+    assert_eq!(by_path("recreated.txt").kind, ChangeKind::Modified);
+    assert_eq!(by_path("prefix").kind, ChangeKind::Deleted);
+    assert!(
+        !changes
+            .iter()
+            .any(|change| change.rel_path == Path::new("prefix-extra/keep.txt")),
+        "a similar path prefix was removed: {changes:?}"
+    );
+    assert!(matches!(
+        by_path("kind.txt").kind,
+        ChangeKind::TypeChanged {
+            from: EntryKind::File,
+            to: EntryKind::Directory,
+        }
+    ));
+    assert!(matches!(
+        by_path("becomes-file").kind,
+        ChangeKind::TypeChanged {
+            from: EntryKind::Directory,
+            to: EntryKind::File,
+        }
+    ));
+    assert_eq!(by_path("xattr.txt").kind, ChangeKind::Modified);
+    assert!(
+        changes
+            .windows(2)
+            .all(|pair| pair[0].rel_path < pair[1].rel_path),
+        "filtered diff output was not path-sorted: {changes:?}"
+    );
 }
 
 #[test]
@@ -100,6 +301,32 @@ fn whiteout_classifier_handles_both_kernel_forms() {
         UpperEntryKind::OpaqueDirectory
     );
     assert_eq!(classify_parts(false, 0, false, None), UpperEntryKind::Entry);
+}
+
+#[test]
+fn diff_handles_a_character_device_whiteout() {
+    let (_root, layout) = fixture();
+    write(&layout.workspace.join("deleted.txt"), "remove\n");
+    manifest::capture_base_manifest(&layout.workspace, &layout.base_manifest_path())
+        .expect("base manifest");
+
+    let upper = layout.upper_dir(1);
+    fs::create_dir_all(&upper).expect("upper");
+    let status = Command::new("mknod")
+        .arg(upper.join("deleted.txt"))
+        .args(["c", "0", "0"])
+        .status()
+        .expect("spawn mknod");
+    assert!(status.success(), "mknod failed with {status}");
+
+    let changes = compute_diff(&layout, &[], &[1], &DiffOptions::default()).expect("diff");
+    assert!(
+        changes
+            .iter()
+            .any(|change| change.rel_path == Path::new("deleted.txt")
+                && change.kind == ChangeKind::Deleted),
+        "character-device whiteout was not detected: {changes:?}"
+    );
 }
 
 fn prepare_diff_fixture() -> (TempDir, SessionLayout) {

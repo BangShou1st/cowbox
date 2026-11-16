@@ -160,3 +160,190 @@ fn sessions_warn_and_gc_refuses_when_active_pointer_is_invalid() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("gc json");
     assert_eq!(value["error"]["code"].as_str(), Some("STATE_CORRUPTED"));
 }
+
+#[test]
+#[cfg(not(windows))]
+fn doctor_resolves_relative_missing_parent_components() {
+    let root = tempfile::tempdir().expect("root");
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    std::fs::create_dir(workspace.join(".git")).expect("git marker");
+    let state = root.path().join("state");
+
+    let output = cowbox()
+        .current_dir(&workspace)
+        .env("COWBOX_HOME", "../missing/../state")
+        .args(["doctor", "--json"])
+        .output()
+        .expect("run doctor");
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("doctor json output");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(value["data"]["ready"].as_bool(), Some(true));
+    assert!(!root.path().join("missing").exists());
+    assert!(!state.exists());
+}
+
+#[test]
+#[cfg(not(windows))]
+fn doctor_does_not_create_the_state_layout() {
+    let dir = workspace();
+    let state_parent = tempfile::tempdir().expect("state parent");
+    let state = state_parent.path().join("nested/cowbox-state");
+
+    let output = cowbox()
+        .current_dir(dir.path())
+        .env("COWBOX_HOME", &state)
+        .args(["doctor", "--json"])
+        .output()
+        .expect("run doctor");
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("doctor json output");
+
+    assert_eq!(value["ok"].as_bool(), Some(true));
+    assert!(
+        !state.exists(),
+        "doctor must not create {}",
+        state.display()
+    );
+}
+
+#[test]
+#[cfg(not(windows))]
+fn doctor_rejects_a_dedicated_9p_state_path_without_creating_it() {
+    let nine_p_root = Path::new("/mnt/e");
+    let Ok(stat) = rustix::fs::statfs(nine_p_root) else {
+        return;
+    };
+    if stat.f_type as u64 != 0x0102_1997 {
+        return;
+    }
+
+    let dir = workspace();
+    let state_parent = tempfile::Builder::new()
+        .prefix("cowbox-doctor-9p-")
+        .tempdir_in(nine_p_root)
+        .expect("dedicated 9p state parent");
+    let state = state_parent.path().join("state");
+
+    let output = cowbox()
+        .current_dir(dir.path())
+        .env("COWBOX_HOME", &state)
+        .args(["doctor", "--json"])
+        .output()
+        .expect("run doctor");
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("doctor json output");
+    let notes = value["data"]["capabilities"]["notes"]
+        .as_array()
+        .expect("doctor notes")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(value["data"]["ready"].as_bool(), Some(false));
+    assert_eq!(
+        value["data"]["capabilities"]["state_fs"].as_str(),
+        Some("9p")
+    );
+    assert_eq!(
+        value["data"]["state_root"].as_str(),
+        state.to_str(),
+        "doctor JSON should report the inspected state root"
+    );
+    assert!(notes.contains("COWBOX_HOME"));
+    assert!(notes.contains("xattr-capable"));
+    assert!(notes.contains("ext4"));
+    assert!(
+        !state.exists(),
+        "doctor must not create {}",
+        state.display()
+    );
+
+    let human = cowbox()
+        .current_dir(dir.path())
+        .env("COWBOX_HOME", &state)
+        .arg("doctor")
+        .output()
+        .expect("run human doctor");
+    let human_stdout = String::from_utf8_lossy(&human.stdout);
+
+    assert_eq!(human.status.code(), Some(1));
+    assert!(human_stdout.contains("State filesystem"));
+    assert!(human_stdout.contains("COWBOX_HOME"));
+    assert!(human_stdout.contains("xattr-capable"));
+    assert!(human_stdout.contains("ext4"));
+}
+
+#[test]
+#[cfg(unix)]
+fn doctor_rejects_a_dangling_state_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let dir = workspace();
+    let state_parent = tempfile::tempdir().expect("state parent");
+    let state_link = state_parent.path().join("state");
+    let missing_target = state_parent.path().join("missing-state");
+    symlink("missing-state", &state_link).expect("dangling state symlink");
+
+    let output = cowbox()
+        .current_dir(dir.path())
+        .env("COWBOX_HOME", &state_link)
+        .args(["doctor", "--json"])
+        .output()
+        .expect("run doctor");
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("doctor json output");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(value["error"]["code"].as_str(), Some("STATE_ROOT"));
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("symbolic link")
+    );
+    assert!(
+        value["error"]["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("xattr-capable")
+    );
+    assert!(!missing_target.exists());
+    assert!(!dir.path().join("sessions").exists());
+    assert!(!dir.path().join("workspaces").exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn doctor_rejects_a_state_symlink_into_the_workspace() {
+    use std::os::unix::fs::symlink;
+
+    let dir = workspace();
+    let state_parent = tempfile::tempdir().expect("state parent");
+    let state_link = state_parent.path().join("state");
+    symlink(dir.path(), &state_link).expect("workspace state symlink");
+
+    let output = cowbox()
+        .current_dir(dir.path())
+        .env("COWBOX_HOME", &state_link)
+        .args(["doctor", "--json"])
+        .output()
+        .expect("run doctor");
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("doctor json output");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(value["error"]["code"].as_str(), Some("STATE_ROOT"));
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("outside the workspace")
+    );
+    assert!(!dir.path().join("sessions").exists());
+    assert!(!dir.path().join("workspaces").exists());
+}

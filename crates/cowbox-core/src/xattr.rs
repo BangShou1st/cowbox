@@ -3,6 +3,8 @@ use rustix::fs::XattrFlags;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+const EMPTY_XATTR_DIGEST: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UserXattr {
     pub name: Vec<u8>,
@@ -19,6 +21,9 @@ pub(crate) fn digest_lossy(path: &Path) -> Option<String> {
 }
 
 pub(crate) fn digest_entries(attrs: &[UserXattr]) -> String {
+    if attrs.is_empty() {
+        return EMPTY_XATTR_DIGEST.to_string();
+    }
     let mut hasher = Sha256::new();
     for attr in attrs {
         hasher.update((attr.name.len() as u64).to_le_bytes());
