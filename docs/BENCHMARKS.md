@@ -1305,3 +1305,124 @@ The Criterion microbenchmark remains available:
 ```bash
 COWBOX_BENCH_FILES=10000 scripts/bench.sh --sample-size 20
 ```
+
+## M3 agent-snapshot and release regression round
+
+This round used the `0.6.0-m3` release build and the published
+`v0.5.0-m2` Linux archive as the baseline. All measurements used the same WSL2
+ext4 machine, release profile, fixture generator, 20 samples, and one excluded
+warm-up. The candidate binary SHA-256 was
+`572707c49c16d0418d8ae1304f1cd37e415b3d1e8a94eb94e1696386c2e3bd61`;
+the baseline binary SHA-256 was
+`a11a80201a5e23696a899f1b4cc9898183d9791a49ce0e15f1236b5197ec416a`.
+
+Environment:
+
+- Intel Core i9-14900HX, 8 logical CPUs visible to WSL2, 1.9 GiB WSL memory.
+- WSL2 kernel `6.6.87.2-microsoft-standard-WSL2`, Ubuntu 24.04.3 LTS.
+- Fixture and state filesystem: ext4 under `/tmp` / `$HOME`.
+- Paired run load average: start `1.248, 0.894, 0.438`; end
+  `1.841, 1.048, 0.499`.
+- Full candidate run load average: start `1.841, 1.048, 0.499`; end
+  `1.667, 1.074, 0.524`.
+
+### Existing run/diff gates
+
+The paired first-run command was:
+
+```bash
+bash scripts/bench-m2.sh \
+  --samples 20 --warmups 1 \
+  --file-counts 10000 200000 \
+  --long-session-steps 0 --compaction-entries 0 \
+  --network-overhead-files 0 \
+  --baseline-binary /tmp/cowbox-baseline-v050 \
+  --json-output "$HOME/cowbox-bench-results/m3-bench-paired-2d64885.json" \
+  --markdown-output "$HOME/cowbox-bench-results/m3-bench-paired-2d64885.md"
+```
+
+| Files | `v0.5.0-m2` median / P95 | `0.6.0-m3` median / P95 | Paired delta median / P95 |
+| ---: | ---: | ---: | ---: |
+| 10,000 first run | 33.06 / 37.72 ms | **34.53 / 38.66 ms** | +0.38 / +6.13 ms |
+| 200,000 first run | 128.40 / 142.59 ms | **130.66 / 142.45 ms** | +2.65 / +10.95 ms |
+
+The candidate remains inside the existing first-run gates (10k: 60 / 80 ms;
+200k: 150 / 200 ms). Median and P95 changes are small relative to run-to-run
+variation.
+
+The candidate-only canonical run used the same fixture and sample policy, with
+depth 1. The raw JSON is
+`/home/bangshou/cowbox-bench-results/m3-bench-full-2d64885.json`:
+
+| Files | First run median / P95 | One-parent run median / P95 | 10-file diff median / P95 |
+| ---: | ---: | ---: | ---: |
+| 10,000 | **35.60 / 38.72 ms** | **30.75 / 35.58 ms** | **10.04 / 14.87 ms** |
+| 200,000 | **138.06 / 150.63 ms** | **27.50 / 31.00 ms** | **97.33 / 101.12 ms** |
+
+The one-layer preparation median was 38.30 ms; the measured step median was
+31.10 ms (P95 37.10 ms). The 10k diff limit of 20 ms and the 200k diff limit of
+200 ms both pass.
+
+Two cold-VM combined attempts produced a 267-277 ms 200k first-run outlier;
+200k-only and reversed-order runs reproduced the stable range, and the retained
+run above followed the exact 20+1 policy. Those cold-start attempts are not
+used for the table.
+
+### MCP handshake and tool calls
+
+`scripts/acceptance_m3.py` uses the repository's deterministic Python MCP
+server. Discovery runs in a one-off `/tmp` sandbox. Each tool call starts a
+fresh upstream process and a real cowbox step. The benchmark section ran 21
+fresh proxies (one excluded warm-up) for process-start + initialize + ping +
+`tools/list`, then one session for continuous `read_file` calls (one excluded
+warm-up):
+
+| MCP phase | Samples | Median | P95 |
+| --- | ---: | ---: | ---: |
+| Fresh proxy initialize only | 20 | **0.827 ms** | **1.300 ms** |
+| Fresh proxy first handshake through `tools/list` discovery | 20 | **84.511 ms** | **85.407 ms** |
+| Continuous tool call, same session | 20 | **122.918 ms** | **142.938 ms** |
+| First tool call after the fresh handshake | 1 | **122.963 ms** | - |
+
+The continuous range was 101.444-144.806 ms. The MCP path includes the
+per-call upstream process handshake and a new sandbox step. It is not
+comparable to a native `cowbox run -- true` latency.
+
+The same acceptance run completed the full workflow:
+
+- `WRONG` write, read-back, diff, rollback to head 0;
+- `Network is unreachable` under `--network off`, then a second rollback;
+- `RIGHT` write at step 4, diff, and commit dry-run;
+- PTY-confirmed session-bound commit of step 4; host content was exactly
+  `RIGHT\n`;
+- final session status `committed`, proxy exit 0.
+
+The raw JSON is
+`/home/bangshou/cowbox-bench-results/m3-acceptance-command-binding.json`.
+Its fixture SHA-256 was
+`72f1367b00d64654cae50327ba3d97b9a1f2f04cf4b68c0f112818d56fb7acf4`.
+
+### M2 preservation and real agent
+
+`scripts/acceptance_m2.py` passed on the M3 debug binary. It recorded a
+300-step real-change session, 279 `host` and 21 `off` policies, compaction at
+steps 151 and 268, 67 mounted layers at the final head, rollback to step 100,
+a branch at step 301, a 16-change commit, host-drift refusal, interrupted
+commit recovery, and directory-recovery host protection. The raw report is
+`/home/bangshou/cowbox-bench-results/m3-m2-acceptance-2d64885.json`.
+
+The real Claude Code 2.1.197 agent used the `cowbox` MCP server with
+`marvis/deepseek-v4-1-flash-261017-antidowngrade[1m]` and no native file tools.
+It performed write (`WRONG`) at step 1, read at step 2, diff, rollback to 0,
+write (`RIGHT`) at step 3, diff, and commit preview. A real PTY confirmation
+committed step 3; the host file contained exactly `RIGHT\n` and the session
+status was `committed`. The raw JSON is
+`/home/bangshou/cowbox-bench-results/m3-claude-agent-command-binding.json`; the
+Claude JSONL stream is stored beside it as
+`m3-claude-agent-command-binding.json.claude.jsonl`.
+
+A Windows `cowbox.exe` build also held one MCP stdio session across discovery,
+write/read, diff, rollback, retry, and commit preview through
+`cowbox.exe -> wsl.exe -> Linux cowbox`; the Windows host file remained absent
+until the terminal commit step. The release-asset rerun is recorded in
+`docs/RELEASES.md`.

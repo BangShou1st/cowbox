@@ -11,6 +11,9 @@
 6. Run `cowbox install-skill --list`, then install the harness you use:
    `cowbox install-skill --harness codex` (or `--all`).
 7. In each project, run `cowbox init --agent` to write project rules.
+8. If the harness supports MCP, configure `cowbox mcp-proxy -- <upstream>` as an
+   explicit opt-in MCP command. `setup` and `install-skill` do not edit harness
+   MCP configuration.
 
 ## Linux/WSL
 

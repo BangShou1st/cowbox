@@ -1691,6 +1691,7 @@ fn run_propagates_command_exit_code_and_json_schema() {
     let (code, value) = run_script(&env, "exit 7");
     assert_eq!(code, 7);
     assert_ok(&value, "run");
+    assert_eq!(value["data"]["parent_step"].as_u64(), Some(0));
     assert_eq!(value["data"]["exit_code"].as_i64(), Some(7));
     assert_eq!(value["session"]["head"].as_u64(), Some(1));
 }

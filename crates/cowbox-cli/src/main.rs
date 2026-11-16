@@ -9,6 +9,7 @@ mod demo;
 mod doctor;
 mod error;
 mod json;
+mod mcp;
 mod render;
 mod setup;
 mod state;

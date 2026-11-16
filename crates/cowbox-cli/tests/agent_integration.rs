@@ -41,11 +41,13 @@ fn install_skill_uses_cowbox_subdirectory_and_list_shows_all_harnesses() {
     let skill = home.path().join(".agents/skills/cowbox");
     assert!(skill.join("SKILL.md").is_file());
     assert!(skill.join("references/windows.md").is_file());
+    assert!(skill.join("references/mcp.md").is_file());
     assert!(skill.join(".cowbox-source").is_file());
     assert!(home.path().join(".codex/skills/cowbox/SKILL.md").is_file());
     let skill_text = fs::read_to_string(skill.join("SKILL.md")).expect("skill text");
     assert!(!skill_text.contains("untrusted scripts"));
     assert!(skill_text.contains("run --network off"));
+    assert!(skill_text.contains("mcp-proxy"));
 
     let list = json_output(cowbox(&home, &project).args(["install-skill", "--list", "--json"]));
     let harnesses = list["data"]["harnesses"].as_array().expect("harness list");
@@ -70,7 +72,8 @@ fn install_rules_is_idempotent_and_removable() {
     assert_eq!(text.matches("<!-- cowbox:begin -->").count(), 1);
     assert!(text.contains("cowbox commit --yes"));
     assert!(!text.contains("untrusted script"));
-    assert!(text.contains("does not isolate the network"));
+    assert!(text.contains("--network off"));
+    assert!(text.contains("cowbox_commit"));
 
     let second = json_output(cowbox(&home, &project).args(["install-rules", "--json"]));
     assert!(

@@ -2,12 +2,12 @@
 
 ## Supported versions
 
-cowbox is an M2 preview. Security fixes target the `main` branch. There is no
+cowbox is an M3 preview. Security fixes target the `main` branch. There is no
 long-term-support release yet.
 
 ## What cowbox is trying to protect
 
-M2 is a safety net for a developer's own workspace while an AI agent edits it.
+M3 is a safety net for a developer's own workspace while an AI agent edits it.
 It aims to prevent:
 
 - Accidental deletion or corruption of tracked, untracked, or ignored files.
@@ -16,13 +16,16 @@ It aims to prevent:
 - Writes outside the workspace and the session's private directories.
 - A partial `commit` leaving the host in a half-written state.
 
-## What M2 does not protect against
+## What M3 does not protect against
 
 - **Default network access.** The default policy is `host`. `run --network off`
   isolates IPv4/IPv6 TCP/UDP connectivity in a network namespace, but it is not
   a firewall and does not isolate filesystem-backed Unix sockets.
 - **Hostile code or kernel exploits.** Landlock and user namespaces are not a
   substitute for a VM. A deliberately malicious binary may exploit the kernel.
+- **Untrusted MCP servers.** An upstream MCP server runs inside the sandbox, but
+  cowbox does not audit its protocol content, tool descriptions, or the
+  trustworthiness of the server package. Treat it like any other local tool.
 - **External edits during a session.** The host workspace is treated as
   read-only by convention. `commit` detects metadata drift, but this is not a
   filesystem snapshot and cannot recover a host file edited outside cowbox.
@@ -47,5 +50,5 @@ disclosure.
 ## Security-sensitive code
 
 Changes to namespace setup, uid/gid mapping, OverlayFS options, Landlock rules,
-environment sanitization, commit journaling, or symlink handling require an
-explicit security review in the pull request.
+environment sanitization, commit journaling, symlink handling, or MCP request
+boundaries require an explicit security review in the pull request.

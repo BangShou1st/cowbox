@@ -90,7 +90,11 @@ pub(crate) fn diagnostic_state_root(
 }
 
 fn ensure_state_root_outside(state_root: &Path, workspace: &Path) -> CliResult<()> {
-    if state_root.starts_with(workspace) || workspace.starts_with(state_root) {
+    let comparison_state = canonical_comparison_path(state_root);
+    let comparison_workspace = canonical_comparison_path(workspace);
+    if comparison_state.starts_with(&comparison_workspace)
+        || comparison_workspace.starts_with(&comparison_state)
+    {
         return Err(CliError::new(
             "STATE_ROOT",
             format!(
@@ -105,6 +109,31 @@ fn ensure_state_root_outside(state_root: &Path, workspace: &Path) -> CliResult<(
         .exit(2));
     }
     Ok(())
+}
+
+fn canonical_comparison_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    let mut missing = Vec::new();
+    let mut current = path;
+    while !current.exists() {
+        let Some(name) = current.file_name() else {
+            return path.to_path_buf();
+        };
+        missing.push(name.to_os_string());
+        let Some(parent) = current.parent() else {
+            return path.to_path_buf();
+        };
+        current = parent;
+    }
+    let Ok(mut canonical) = current.canonicalize() else {
+        return path.to_path_buf();
+    };
+    for component in missing.into_iter().rev() {
+        canonical.push(component);
+    }
+    canonical
 }
 
 #[cfg(any(not(windows), test))]

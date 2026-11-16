@@ -1,8 +1,8 @@
 use crate::agent::{config as agent_config, harness, policy, rules, skill};
 use crate::cli::{
     CliCommand, CommitArgs, DemoArgs, DiffArgs, DiscardArgs, DoctorArgs, GcArgs, HiddenArgs,
-    InitArgs, InstallRulesArgs, InstallSkillArgs, LogArgs, PathArgs, PolicyArgs, RollbackArgs,
-    RunArgs, SessionsArgs, SetupArgs, StatsArgs, UndoArgs, UpdateArgs,
+    InitArgs, InstallRulesArgs, InstallSkillArgs, LogArgs, McpAdapterArgs, McpProxyArgs, PathArgs,
+    PolicyArgs, RollbackArgs, RunArgs, SessionsArgs, SetupArgs, StatsArgs, UndoArgs, UpdateArgs,
 };
 use crate::config::{Config, RunPolicyOverrides};
 #[cfg(not(windows))]
@@ -57,6 +57,8 @@ pub fn dispatch(command: &CliCommand) -> CliResult<i32> {
         CliCommand::Policy(args) => command_policy(args),
         CliCommand::Update(args) => command_update(args),
         CliCommand::Path(args) => command_path(args),
+        CliCommand::McpProxy(args) => command_mcp_proxy(args),
+        CliCommand::McpAdapter(args) => command_mcp_adapter(args),
         CliCommand::SandboxExec(args) => command_hidden(args, true),
         CliCommand::Supervisor(args) => command_hidden(args, false),
     }
@@ -185,6 +187,7 @@ fn command_run(args: &RunArgs) -> CliResult<i32> {
             Some(&record),
             json!({
                 "step": step_id,
+                "parent_step": previous_head,
                 "exit_code": outcome.exit_code,
                 "signal": outcome.signal,
                 "duration_ms": outcome.duration_ms,
@@ -216,7 +219,7 @@ fn command_diff(args: &DiffArgs) -> CliResult<i32> {
     }
     let ctx = setup()?;
     let _lock = ctx.store.lock()?;
-    let record = active_record(&ctx)?;
+    let record = active_record_for(&ctx, args.session.as_deref())?;
     let target = args.step.unwrap_or(record.dag.head_step);
     if !record.dag.nodes.contains_key(&target) {
         return Err(CliError::new(
@@ -278,7 +281,7 @@ fn command_log(args: &LogArgs) -> CliResult<i32> {
 fn command_rollback(args: &RollbackArgs) -> CliResult<i32> {
     let ctx = setup()?;
     let _lock = ctx.store.lock()?;
-    let mut record = active_record(&ctx)?;
+    let mut record = active_record_for(&ctx, args.session.as_deref())?;
     ensure_no_pending_commit(&ctx, &record)?;
     let previous = record.dag.head_step;
     record.dag.rollback(args.step)?;
@@ -336,7 +339,7 @@ fn command_commit(args: &CommitArgs) -> CliResult<i32> {
     if args.recover {
         return command_commit_recover(&ctx, args);
     }
-    let mut record = active_record(&ctx)?;
+    let mut record = active_record_for(&ctx, args.session.as_deref())?;
     ensure_no_pending_commit(&ctx, &record)?;
     let target = args.step.unwrap_or(record.dag.head_step);
     if !record.dag.nodes.contains_key(&target) {
@@ -858,10 +861,12 @@ fn command_doctor(args: &DoctorArgs) -> CliResult<i32> {
         let static_ready = doctor::capabilities_ready(&capabilities);
         let network = config.network_policy(args.network.map(Into::into)).mode;
         let run_check = if args.check_run {
+            let state_disk =
+                doctor::state_disk_report(&context.state_root, capabilities.state_fs.as_deref());
             Some(doctor::check_run(
                 &std::env::current_exe()?,
                 network,
-                doctor::state_fs_ready(&capabilities),
+                state_disk,
             )?)
         } else {
             None
@@ -1508,6 +1513,14 @@ fn command_path(args: &PathArgs) -> CliResult<i32> {
     }
 }
 
+fn command_mcp_proxy(args: &McpProxyArgs) -> CliResult<i32> {
+    crate::mcp::proxy_main(args)
+}
+
+fn command_mcp_adapter(args: &McpAdapterArgs) -> CliResult<i32> {
+    crate::mcp::adapter_main(args)
+}
+
 fn command_hidden(args: &HiddenArgs, sandbox_exec: bool) -> CliResult<i32> {
     let _ = &args.spec;
     #[cfg(target_os = "linux")]
@@ -1595,6 +1608,24 @@ fn active_record(ctx: &Context) -> CliResult<SessionRecord> {
         .hint("run `cowbox run -- <cmd>` first")
         .exit(1)
     })
+}
+
+fn active_record_for(ctx: &Context, requested: Option<&str>) -> CliResult<SessionRecord> {
+    let record = active_record(ctx)?;
+    if let Some(requested) = requested {
+        if requested != record.session_id {
+            return Err(CliError::new(
+                "SESSION_NOT_ACTIVE",
+                format!(
+                    "session {requested} is not the active session for this workspace; active session is {}",
+                    record.session_id
+                ),
+            )
+            .hint("bind the intended session or start it before retrying")
+            .exit(2));
+        }
+    }
+    Ok(record)
 }
 
 fn target_chain(record: &SessionRecord, target: u64) -> CliResult<Vec<u64>> {

@@ -15,6 +15,10 @@ if [[ ! -f crates/cowbox-cli/tests/adversarial_suite.rs ]]; then
 fi
 
 COWBOX_REQUIRE_SANDBOX=1 cargo test -p cowbox-cli --test adversarial_suite -- --test-threads=1
+COWBOX_REQUIRE_SANDBOX=1 cargo test -p cowbox-cli --test mcp_proxy -- --test-threads=1
 bash scripts/smoke.sh
+python3 scripts/acceptance_m3.py --binary "$CARGO_TARGET_DIR/debug/cowbox" --skip-benchmark
+python3 scripts/acceptance_m2.py --binary "$CARGO_TARGET_DIR/debug/cowbox" \
+    --json-output "$HOME/cowbox-bench-results/m2-preservation-latest.json"
 
 echo "all cowbox tests passed; CARGO_TARGET_DIR=$CARGO_TARGET_DIR"

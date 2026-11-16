@@ -31,6 +31,7 @@ jobs:
           asset="cowbox-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz"
           tar -C target/release -czf "$asset" cowbox
           sha256sum "$asset" > "$asset.sha256"
+          sha256sum -c "$asset.sha256"
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
@@ -59,7 +60,24 @@ jobs:
           $name = "cowbox-$env:GITHUB_REF_NAME-x86_64-pc-windows-msvc"
           Compress-Archive -Path target/release/cowbox.exe -DestinationPath "$name.zip"
           $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+          $line = "$hash  $name.zip"
+          [System.IO.File]::WriteAllText(
+            "$name.zip.sha256",
+            $line + "`n",
+            [System.Text.Encoding]::ASCII
+          )
+          $bytes = [System.IO.File]::ReadAllBytes("$name.zip.sha256")
+          if ([Array]::IndexOf($bytes, [byte]13) -ge 0) {
+            throw "checksum file contains CR bytes"
+          }
+          $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+          if ($text -ne ($line + "`n")) {
+            throw "checksum file format is not canonical: $text"
+          }
+          $actual = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $hash) {
+            throw "checksum verification failed for $name.zip"
+          }
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
@@ -87,6 +105,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          if grep -HnE '[[:blank:]]+$' release-assets/*.sha256; then
+            echo "checksum files contain trailing whitespace" >&2
+            exit 1
+          fi
+          if grep -Hn $'\r' release-assets/*.sha256; then
+            echo "checksum files contain CR bytes" >&2
+            exit 1
+          fi
+          (
+            cd release-assets
+            for checksum in *.sha256; do
+              sha256sum -c "$checksum"
+            done
+          )
           prerelease=""
           case "$GITHUB_REF_NAME" in
             *-*) prerelease="--prerelease" ;;

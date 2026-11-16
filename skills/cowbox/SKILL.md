@@ -50,6 +50,11 @@ harnesses.
 6. **Treat extra write paths as host writes.** `--allow-write` and
    `extra_rw_paths` bypass the snapshot. Use them only for caches or toolchain
    paths you understand.
+7. **Use MCP snapshots when configured.** If the harness exposes
+   `cowbox_diff`, `cowbox_rollback`, or `cowbox_commit` through cowbox, route
+   workspace edits through the upstream MCP file tools. Inspect the snapshot
+   metadata after each call and roll back a bad step instead of piling on more
+   edits. `cowbox_commit` only previews; never claim it wrote the host.
 
 ## When to use
 
@@ -93,6 +98,28 @@ On Windows the project can stay at `E:\...`; `cowbox.exe` maps it into WSL. Do
 not ask the user to move the project into WSL. Run `cowbox path <path>` when a
 command needs an explicit WSL path.
 
+## MCP snapshot workflow
+
+When the agent harness is configured with a cowbox MCP server, the upstream
+tools work normally, but every `tools/call` creates a cowbox step:
+
+```text
+cowbox mcp-proxy --network off -- <upstream MCP command>
+```
+
+1. Read `_meta.cowbox` from the result. It contains `session`, `head_before`,
+   `step`, `head_after`, and the rollback command.
+2. After a failed or suspicious edit, call `cowbox_diff` before trying another
+   fix. If the step is bad, call `cowbox_rollback` with the pre-edit head.
+3. Reapply the intended change after a rollback, then inspect the net diff.
+4. Call `cowbox_commit` only to preview. It returns the target step and the
+   session-bound terminal command. Tell the user to run that exact command
+   (`cowbox commit --step <n> --session <id>`) and approve the prompt.
+
+The proxy starts a fresh upstream process per call. If the upstream server
+needs state across calls, it must save that state in workspace files. Do not
+assume a previous upstream process is still alive.
+
 ## Windows and agent boundary
 
 - `cowbox.exe setup` installs the Windows launcher and the Linux engine in WSL,
@@ -101,7 +128,7 @@ command needs an explicit WSL path.
   installs explicitly; `--all` installs into every supported harness.
 - `cowbox init --agent` writes the project rule blocks for AGENTS.md,
   CLAUDE.md and Cursor.
-- Codex Desktop's built-in file editor is not intercepted in M2. Only commands
+- Codex Desktop's built-in file editor is not intercepted in M3. Only commands
   routed through cowbox are protected; the native Windows backend is a later
   milestone.
 
@@ -122,12 +149,14 @@ cowbox stats --json
 - [Installation and harnesses](references/installation.md)
 - [Windows/WSL behavior](references/windows.md)
 - [Workflow and recovery](references/workflow.md)
+- [MCP proxy setup](references/mcp.md)
 - [Troubleshooting](references/troubleshooting.md)
 
 ## Boundary
 
-This skill uses the CLI. The MCP proxy and synthetic `cowbox_diff` /
-`cowbox_rollback` / `cowbox_commit` tools are not part of M2; do not assume
-they exist. Codex Desktop built-in edits are outside this boundary until the
-native Windows backend lands. `run --network off` is available, but it isolates
-IP connectivity only and is not a packet-filtering sandbox.
+This skill covers both the CLI and the optional stdio MCP snapshot proxy. The
+MCP control tools are read-only, pointer-only, or dry-run-only; the host write
+still requires a terminal commit and human approval. Codex Desktop built-in
+edits are outside this boundary until the native Windows backend lands.
+`--network off` isolates IP connectivity only and is not a packet-filtering
+sandbox.

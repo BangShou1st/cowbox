@@ -93,6 +93,11 @@ jobs:
           COWBOX_REQUIRE_SANDBOX: "1"
         run: cargo test -p cowbox-cli --test adversarial_suite -- --test-threads=1
 
+      - name: MCP proxy sandbox suite
+        env:
+          COWBOX_REQUIRE_SANDBOX: "1"
+        run: cargo test -p cowbox-cli --test mcp_proxy -- --test-threads=1
+
       - name: CLI smoke (run / diff / rollback / commit dry-run)
         run: |
           cargo build -p cowbox-cli
@@ -116,6 +121,12 @@ jobs:
           python3 scripts/offline_workflow.py \
             --binary "$GITHUB_WORKSPACE/target/debug/cowbox" \
             --json-output "$RUNNER_TEMP/offline-workflow.json"
+
+      - name: M3 MCP local-fixture acceptance
+        run: |
+          python3 scripts/acceptance_m3.py \
+            --binary "$GITHUB_WORKSPACE/target/debug/cowbox" \
+            --json-output "$RUNNER_TEMP/acceptance-m3.json"
 
       - name: M2 long-session and network acceptance
         if: matrix.os == 'ubuntu-24.04'

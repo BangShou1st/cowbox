@@ -279,6 +279,71 @@ fn doctor_rejects_a_dedicated_9p_state_path_without_creating_it() {
 }
 
 #[test]
+#[cfg(not(windows))]
+fn doctor_check_run_reports_an_unwritable_ext4_state_parent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if rustix::process::geteuid().as_raw() == 0 {
+        return;
+    }
+    let root = match tempfile::Builder::new()
+        .prefix("cowbox-doctor-state-disk-")
+        .tempdir_in("/tmp")
+    {
+        Ok(root) => root,
+        Err(_) => return,
+    };
+    let stat = match rustix::fs::statfs(root.path()) {
+        Ok(stat) => stat,
+        Err(_) => return,
+    };
+    if stat.f_type as u64 != 0xEF53 {
+        return;
+    }
+
+    let dir = workspace();
+    let state_parent = root.path().join("state-parent");
+    std::fs::create_dir(&state_parent).expect("state parent");
+    let state = state_parent.join("state");
+    std::fs::set_permissions(&state_parent, std::fs::Permissions::from_mode(0o500))
+        .expect("make state parent read-only");
+
+    let output = cowbox()
+        .current_dir(dir.path())
+        .env("COWBOX_HOME", &state)
+        .args(["doctor", "--check-run", "--json"])
+        .output()
+        .expect("run active doctor");
+    std::fs::set_permissions(&state_parent, std::fs::Permissions::from_mode(0o700))
+        .expect("restore state parent mode");
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("doctor json output");
+    let check = &value["data"]["run_check"];
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(value["data"]["ready"].as_bool(), Some(false));
+    assert_eq!(check["attempted"].as_bool(), Some(false));
+    assert_eq!(check["command_started"].as_bool(), Some(false));
+    assert_eq!(check["stages"]["state_disk"].as_bool(), Some(false));
+    assert_eq!(
+        check["error"]["code"].as_str(),
+        Some("STATE_DISK_NOT_READY")
+    );
+    assert_eq!(check["state_disk"]["path"].as_str(), state.to_str());
+    assert_eq!(
+        check["state_disk"]["existing_prefix"].as_str(),
+        state_parent.to_str()
+    );
+    assert!(
+        check["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not writable and searchable")
+    );
+    assert!(!state.exists());
+}
+
+#[test]
 #[cfg(unix)]
 fn doctor_rejects_a_dangling_state_symlink() {
     use std::os::unix::fs::symlink;
