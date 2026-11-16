@@ -1,5 +1,71 @@
 # Release verification
 
+## v0.6.0-m3 MCP agent snapshot preview
+
+- Tag: `v0.6.0-m3`
+- Release commit: `7eb2fdee090bac8b63f25c961e07c3f795285d7d`
+- Release workflow: https://github.com/BangShou1st/cowbox/actions/runs/43870327668
+- Release: https://github.com/BangShou1st/cowbox/releases/tag/v0.6.0-m3
+- Type: GitHub pre-release
+
+Published archive hashes:
+
+| Asset | SHA-256 |
+| --- | --- |
+| `cowbox-v0.6.0-m3-x86_64-unknown-linux-gnu.tar.gz` | `eec5e14804f2f9d0af4ce6997ca8b219ff2338c64ea6f6f24281426d19d18b00` |
+| `cowbox-v0.6.0-m3-x86_64-pc-windows-msvc.zip` | `d30e1b14bd2483dd40766788cf230e292fd3f7e90f65b687f1477dac45777366` |
+
+Downloaded assets were re-hashed and matched their published `.sha256` files.
+Both checksum files had no CR bytes and no trailing filename whitespace, and
+`sha256sum -c` passed for both archives.
+
+Extracted binary hashes:
+
+| Binary | SHA-256 |
+| --- | --- |
+| Linux `cowbox` | `c73d9d2a331d9676ec5af009aa4f29db424f760cf58d68351a13c66b70728c1d` |
+| Windows `cowbox.exe` | `4805df57439286770bcc9b12ca2a4d0ced48c29ce7658ee34e8e674bf292dc97` |
+
+Acceptance used only the downloaded release assets:
+
+1. The Linux archive was extracted under `/tmp` on ext4. `--version` reported
+   `cowbox 0.6.0-m3`; `doctor --json` reported `ready=true` with Landlock ABI 3;
+   `doctor --check-run --network off --json` reported a ready active-run chain
+   and `command_started=true`; `demo --offline --json` reported
+   `host_unchanged=true`.
+2. The local MCP acceptance wrote `WRONG`, read it back, diffed, rolled back,
+   verified host TCP was unreachable under `--network off`, wrote `RIGHT`,
+   previewed the commit, and used the returned session-bound command with a
+   real PTY confirmation. The host contained exactly `RIGHT\n` and the session
+   ended `committed`. The extracted release binary reported MCP first-handshake
+   median / P95 of 87.557 / 108.870 ms and continuous same-session tool calls of
+   103.716 / 125.825 ms. A separate black-box command-path check confirmed that
+   rolling back an MCP step with `cowbox rollback 2 --session <id>` left the
+   previously completed terminal step 2 and head at 2. After switching sessions,
+   the old session-bound commit command failed with `SESSION_NOT_ACTIVE`, the
+   new session stayed at head 1, and the host remained untouched.
+3. A real Claude Code 2.1.197 session used a temporary MCP config and only the
+   cowbox MCP tools with `marvis/deepseek-v4-1-flash-261017-antidowngrade[1m]`.
+   It created steps 1 and 2 for the wrong write and read, diffed, rolled back
+   to 0, created step 3 for `RIGHT`, and received
+   `cowbox commit --step 3 --session <id>`. The terminal confirmation committed
+   step 3, the host file was exactly `RIGHT\n`, and the final session status was
+   `committed`.
+4. The Windows ZIP was extracted and its `cowbox.exe` reported `0.6.0-m3`.
+   With an isolated `%APPDATA%`, `doctor --json` preserved the valid Linux
+   result and exit 0; a nonexistent distro returned structured
+   `WSL_START_FAILED` with exit 1. A real
+   `cowbox.exe -> wsl.exe -> Linux cowbox` MCP session completed discovery,
+   write/read, diff, rollback, retry, and commit preview across multiple
+   requests. The Windows host file stayed absent, and the returned rollback and
+   commit commands carried the bound session.
+5. `scripts/acceptance_m2.py` passed on the tagged source with the debug binary.
+   It completed the 300-step mixed-policy session, compaction at steps 151 and
+   268, rollback, branch, commit, interrupted-commit recovery, host-drift
+   refusal, and directory-recovery host protection.
+
+No release asset was rebuilt or modified during acceptance.
+
 ## v0.5.0-m2 offline execution preview
 
 - Tag: `v0.5.0-m2`
