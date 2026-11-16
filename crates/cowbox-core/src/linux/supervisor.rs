@@ -16,7 +16,7 @@ pub fn supervisor_main() -> Result<()> {
     let started = Instant::now();
     let result = match run_supervisor(&spec, started) {
         Ok(result) => result,
-        Err(error) => ExecResult::error(error.to_string()),
+        Err(error) => ExecResult::error_with_code(error.to_string(), error.code()),
     };
     write_result(&spec.result_path, &result)?;
     std::process::exit(result.exit_code);
@@ -85,6 +85,7 @@ fn run_supervisor(spec: &RunSpec, started: Instant) -> Result<ExecResult> {
         orphans_reaped,
         timed_out,
         error: None,
+        error_code: None,
     })
 }
 

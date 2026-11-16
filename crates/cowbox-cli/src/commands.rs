@@ -11,7 +11,9 @@ use crate::error::{CliError, CliResult};
 use crate::json;
 use crate::render::{self, Stats};
 use crate::setup;
-use crate::state::{GlobalSession, GlobalSessionStore, SessionRecord, SessionStatus, SessionStore};
+use crate::state::{
+    GlobalSession, GlobalSessionStore, RunPolicyRecord, SessionRecord, SessionStatus, SessionStore,
+};
 use crate::workspace;
 use cowbox_core::{CommitRecoveryAction, PendingRecovery, SandboxBackend, SessionLayout};
 use cowbox_dag::{BASE_STEP, StepNode};
@@ -113,9 +115,11 @@ fn command_run(args: &RunArgs) -> CliResult<i32> {
     let (mut record, created) = load_or_create(&ctx, backend.as_ref(), args.session.as_deref())?;
     let step_id = record.dag.next_step_id();
     let parent_layers = record.dag.active_layer_chain();
+    let network = ctx.config.network_policy(args.network.map(Into::into));
     let policy = ctx.config.to_exec_policy(
         &ctx.workspace,
         &RunPolicyOverrides {
+            network: Some(network.mode),
             allow_read: args.allow_read.clone(),
             allow_write: args.allow_write.clone(),
             env: args.env.clone(),
@@ -124,6 +128,17 @@ fn command_run(args: &RunArgs) -> CliResult<i32> {
         },
         args.json,
     )?;
+    let run_policy = RunPolicyRecord {
+        network: network.mode,
+        network_source: network.source,
+        isolated_caches: ctx.config.sandbox.isolate_caches,
+        host_caches: ctx
+            .config
+            .host_cache_sources(&ctx.workspace)?
+            .into_iter()
+            .map(|source| source.kind.as_str().to_string())
+            .collect(),
+    };
     let layout = ctx.store.layout(&record.session_id);
     let outcome = match backend.exec_step(&layout, &parent_layers, step_id, &args.cmd, &policy) {
         Ok(outcome) => outcome,
@@ -149,6 +164,7 @@ fn command_run(args: &RunArgs) -> CliResult<i32> {
     node.orphans_reaped = outcome.orphans_reaped;
     node.timed_out = outcome.timed_out;
     record.dag.add_step(node)?;
+    record.run_policies.insert(step_id, run_policy.clone());
     record.updated_at_unix_ms = workspace::now_ms();
     ctx.store.save(&record)?;
     ctx.store.append_event(
@@ -178,6 +194,7 @@ fn command_run(args: &RunArgs) -> CliResult<i32> {
                 "stderr": outcome.stderr,
                 "stdout_truncated": outcome.stdout_truncated,
                 "stderr_truncated": outcome.stderr_truncated,
+                "policy": run_policy_json(Some(&run_policy)),
             }),
         ))?;
     } else {
@@ -838,20 +855,42 @@ fn command_doctor(args: &DoctorArgs) -> CliResult<i32> {
         let config = Config::load(&workspace)?;
         let host_caches = doctor::host_cache_reports(&config, &workspace)?;
         let capabilities = backend().probe(&context.state_root)?;
-        let ready = doctor::capabilities_ready(&capabilities);
+        let static_ready = doctor::capabilities_ready(&capabilities);
+        let network = config.network_policy(args.network.map(Into::into)).mode;
+        let run_check = if args.check_run {
+            Some(doctor::check_run(
+                &std::env::current_exe()?,
+                network,
+                doctor::state_fs_ready(&capabilities),
+            )?)
+        } else {
+            None
+        };
+        let ready = static_ready && run_check.as_ref().is_none_or(|report| report.ready);
         if args.json {
-            json::print(&json::ok(
-                "doctor",
-                None,
+            let data = if let Some(report) = &run_check {
+                json!({
+                    "ready": ready,
+                    "static_ready": static_ready,
+                    "capabilities": capabilities,
+                    "state_root": context.state_root,
+                    "host_caches": host_caches,
+                    "run_check": report,
+                })
+            } else {
                 json!({
                     "ready": ready,
                     "capabilities": capabilities,
                     "state_root": context.state_root,
                     "host_caches": host_caches,
-                }),
-            ))?;
+                })
+            };
+            json::print(&json::ok("doctor", None, data))?;
         } else {
             render::print_doctor(&capabilities, &context.state_root, &host_caches, ready);
+            if let Some(report) = &run_check {
+                render::print_run_check(report);
+            }
         }
         Ok(if ready { 0 } else { 1 })
     }
@@ -1189,6 +1228,10 @@ fn command_stats(args: &StatsArgs) -> CliResult<i32> {
         .probe(&ctx.state_root)
         .ok()
         .and_then(|capabilities| capabilities.landlock_abi);
+    let policy = record.current_run_policy().cloned();
+    let network_isolation = policy
+        .as_ref()
+        .is_some_and(|policy| policy.network.isolates_network());
     let stats = Stats {
         session_id: record.session_id.clone(),
         status: format!("{:?}", record.status),
@@ -1200,7 +1243,8 @@ fn command_stats(args: &StatsArgs) -> CliResult<i32> {
         orphans,
         disk_bytes: ctx.store.disk_usage(&record.session_id),
         landlock_abi,
-        network_isolation: false,
+        network_isolation,
+        policy,
         blocked_writes: None,
     };
     if args.json {
@@ -1218,6 +1262,7 @@ fn command_stats(args: &StatsArgs) -> CliResult<i32> {
                 "disk_bytes": stats.disk_bytes,
                 "landlock_abi": stats.landlock_abi,
                 "network_isolation": stats.network_isolation,
+                "policy": run_policy_json(stats.policy.as_ref()),
                 "blocked_writes": stats.blocked_writes,
             }),
         ))?;
@@ -1225,6 +1270,25 @@ fn command_stats(args: &StatsArgs) -> CliResult<i32> {
         render::print_stats(&stats);
     }
     Ok(0)
+}
+
+fn run_policy_json(policy: Option<&RunPolicyRecord>) -> serde_json::Value {
+    match policy {
+        Some(policy) => json!({
+            "recorded": true,
+            "network": policy.network,
+            "network_source": policy.network_source,
+            "isolated_caches": policy.isolated_caches,
+            "host_caches": policy.host_caches,
+        }),
+        None => json!({
+            "recorded": false,
+            "network": "unknown",
+            "network_source": "legacy",
+            "isolated_caches": null,
+            "host_caches": [],
+        }),
+    }
 }
 
 fn command_setup(args: &SetupArgs) -> CliResult<i32> {

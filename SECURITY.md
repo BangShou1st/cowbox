@@ -2,12 +2,12 @@
 
 ## Supported versions
 
-cowbox is an M1 preview. Security fixes target the `main` branch. There is no
+cowbox is an M2 preview. Security fixes target the `main` branch. There is no
 long-term-support release yet.
 
 ## What cowbox is trying to protect
 
-M1 is a safety net for a developer's own workspace while an AI agent edits it.
+M2 is a safety net for a developer's own workspace while an AI agent edits it.
 It aims to prevent:
 
 - Accidental deletion or corruption of tracked, untracked, or ignored files.
@@ -16,10 +16,11 @@ It aims to prevent:
 - Writes outside the workspace and the session's private directories.
 - A partial `commit` leaving the host in a half-written state.
 
-## What M1 does not protect against
+## What M2 does not protect against
 
-- **Network access.** M1 has no network namespace or seccomp network policy.
-  Sandboxed code can connect to the network and bind host ports.
+- **Default network access.** The default policy is `host`. `run --network off`
+  isolates IPv4/IPv6 TCP/UDP connectivity in a network namespace, but it is not
+  a firewall and does not isolate filesystem-backed Unix sockets.
 - **Hostile code or kernel exploits.** Landlock and user namespaces are not a
   substitute for a VM. A deliberately malicious binary may exploit the kernel.
 - **External edits during a session.** The host workspace is treated as
@@ -27,8 +28,8 @@ It aims to prevent:
   filesystem snapshot and cannot recover a host file edited outside cowbox.
 - **Secrets deliberately exposed to the agent.** If a path is added to the
   read allowlist, the agent can read it.
-- **All filesystem semantics.** Hardlinks and xattrs are not preserved in M1;
-  device nodes, FIFOs, and sockets are refused on commit.
+- **All filesystem semantics.** Only `user.*` xattrs are preserved. Device
+  nodes, FIFOs, and sockets are refused on commit.
 
 Report a vulnerability through GitHub's **private vulnerability reporting** on
 this repository. Do not open a public issue. Include:

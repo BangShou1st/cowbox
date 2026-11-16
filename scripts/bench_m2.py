@@ -62,6 +62,15 @@ def parse_args() -> argparse.Namespace:
         help="upper entries for the single compaction cost probe; 0 disables it",
     )
     parser.add_argument(
+        "--network-overhead-files",
+        type=int,
+        default=10_000,
+        help=(
+            "files in the host-vs-off network overhead fixture; "
+            "0 disables the comparison"
+        ),
+    )
+    parser.add_argument(
         "--allow-legacy-layer-limit",
         action="store_true",
         help=(
@@ -102,6 +111,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--long-session-file-count must be at least 100")
     if args.compaction_entries < 0:
         parser.error("--compaction-entries cannot be negative")
+    if args.network_overhead_files not in (0,) and args.network_overhead_files < 100:
+        parser.error("--network-overhead-files must be 0 or at least 100")
     return args
 
 
@@ -582,6 +593,110 @@ def measure_subsequent_run(
         "step": summarize(measured),
         "preparation": summarize(preparation),
     }
+
+
+def network_delta(off: dict[str, Any], host: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "median_ms": round(off["median_ms"] - host["median_ms"], 3),
+        "p95_ms": round(off["p95_ms"] - host["p95_ms"], 3),
+    }
+
+
+def measure_network_overhead(
+    binary: Path,
+    bench_root: Path,
+    files: int,
+    samples: int,
+    warmups: int,
+    timeout: int,
+) -> dict[str, Any]:
+    print(
+        f"[network] preparing {files:,}-file host/off overhead fixture",
+        flush=True,
+    )
+    workspace, _changed = prepare_fixture(
+        bench_root / "network-overhead-fixture",
+        files,
+        binary,
+        timeout,
+    )
+    state_base = bench_root / "sample-states" / "network-overhead"
+    state_base.mkdir(parents=True)
+    timings = {
+        mode: {"first_run": [], "one_parent": []}
+        for mode in ("host", "off")
+    }
+    counter = 0
+
+    def sample(mode: str) -> tuple[float, float]:
+        nonlocal counter
+        counter += 1
+        with SampleState(state_base, f"network-{mode}", counter) as state:
+            first_ms, first, _process = invoke_json(
+                binary,
+                workspace,
+                state,
+                ["run", "--json", "--network", mode, "--", "true"],
+                timeout,
+            )
+            if first.get("data", {}).get("step") != 1:
+                raise BenchmarkError(
+                    f"{mode} network first run did not create step 1: {first}"
+                )
+            second_ms, second, _process = invoke_json(
+                binary,
+                workspace,
+                state,
+                ["run", "--json", "--network", mode, "--", "true"],
+                timeout,
+            )
+            if second.get("data", {}).get("step") != 2:
+                raise BenchmarkError(
+                    f"{mode} network parent-layer run did not create step 2: {second}"
+                )
+            policy = second.get("data", {}).get("policy", {})
+            if policy.get("network") != mode:
+                raise BenchmarkError(
+                    f"{mode} network policy was not recorded: {second}"
+                )
+            return first_ms, second_ms
+
+    for _ in range(warmups):
+        for mode in ("host", "off"):
+            sample(mode)
+    for _ in range(samples):
+        for mode in ("host", "off"):
+            first_ms, second_ms = sample(mode)
+            timings[mode]["first_run"].append(first_ms)
+            timings[mode]["one_parent"].append(second_ms)
+
+    summary = {
+        mode: {
+            "first_run": summarize(values["first_run"]),
+            "one_parent": summarize(values["one_parent"]),
+        }
+        for mode, values in timings.items()
+    }
+    result = {
+        "files": files,
+        "host": summary["host"],
+        "off": summary["off"],
+        "off_minus_host": {
+            "first_run": network_delta(
+                summary["off"]["first_run"], summary["host"]["first_run"]
+            ),
+            "one_parent": network_delta(
+                summary["off"]["one_parent"], summary["host"]["one_parent"]
+            ),
+        },
+    }
+    print(
+        f"[network] first-run host={result['host']['first_run']['median_ms']:.2f} ms "
+        f"off={result['off']['first_run']['median_ms']:.2f} ms "
+        f"delta={result['off_minus_host']['first_run']['median_ms']:+.2f} ms",
+        flush=True,
+    )
+    return result
 
 
 def make_change_script(changed: Sequence[Path]) -> str:
@@ -1169,6 +1284,32 @@ def result_markdown(result: dict[str, Any]) -> str:
                 f"- Legacy limit rejection at step {rejected['step']} after "
                 f"{rejected['elapsed_ms']:.2f} ms with `{rejected['error_code']}`."
             )
+    network = result.get("network_overhead")
+    if network:
+        lines.extend(
+            [
+                "",
+                "## Network namespace overhead",
+                "",
+                f"- Fixture: {network['files']:,} files; the same workspace is "
+                "used for both policies.",
+                "",
+                "| Scenario | Host median (P95) | Off median (P95) | Off minus host median (P95) |",
+                "| --- | ---: | ---: | ---: |",
+            ]
+        )
+        for key, label in (
+            ("first_run", "First run"),
+            ("one_parent", "One parent layer"),
+        ):
+            host = network["host"][key]
+            off = network["off"][key]
+            delta = network["off_minus_host"][key]
+            lines.append(
+                f"| {label} | {host['median_ms']:.2f} ms ({host['p95_ms']:.2f} ms) "
+                f"| {off['median_ms']:.2f} ms ({off['p95_ms']:.2f} ms) "
+                f"| {delta['median_ms']:+.2f} ms ({delta['p95_ms']:+.2f} ms) |"
+            )
     compaction = result.get("compaction_entries")
     if compaction:
         lines.extend(
@@ -1242,6 +1383,7 @@ def main() -> int:
             "long_session_steps": args.long_session_steps,
             "long_session_file_count": args.long_session_file_count,
             "compaction_entries": args.compaction_entries,
+            "network_overhead_files": args.network_overhead_files,
             "allow_legacy_layer_limit": args.allow_legacy_layer_limit,
             "require_fs": args.require_fs,
             "timeout_seconds": args.timeout_seconds,
@@ -1309,6 +1451,15 @@ def main() -> int:
                 args.warmups,
                 args.timeout_seconds,
             )
+            if args.network_overhead_files:
+                result["network_overhead"] = measure_network_overhead(
+                    binary,
+                    bench_root,
+                    args.network_overhead_files,
+                    args.samples,
+                    args.warmups,
+                    args.timeout_seconds,
+                )
             if args.long_session_steps:
                 long_workspace, _long_changed = prepare_fixture(
                     bench_root / "long-fixture",

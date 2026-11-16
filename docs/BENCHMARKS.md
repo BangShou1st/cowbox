@@ -1116,6 +1116,127 @@ acceptance passed with compaction at steps 151 and 268 and 16 diff entries.
 The acceptance JSON and Criterion log are in
 `/home/bangshou/cowbox-bench-results/m2-recovery-verify-1Oz2Nh/`.
 
+## M2 offline execution round
+
+This round uses merge commit
+`29af7e762c9f3a6134c128ee66a6ec84f4992458` as the baseline and candidate
+commit `fb4dad070354bce1fae6ac017e83b50412b3166c` for the network-policy,
+active-diagnostic, and offline-workflow delivery. The baseline release binary
+SHA-256 is
+`e991767788c3c0ca73ef390f8758ded544345491086dda3e352156eabe927796`.
+The candidate release binary SHA-256 is
+`5fcd485054b69cfa4eefb7f645b9cc27e7b1698066f813ba991c971b73cfa648`.
+
+Both formal runs used the same WSL2/ext4 machine profile, release profile,
+fixture generator, 20 measured samples, one excluded warm-up per scenario, and
+no sample removal or winsorization. The baseline run started at load average
+`1.082, 0.673, 0.281` and ended at `1.682, 0.845, 0.349`; the candidate run
+started at `1.314, 0.550, 0.214` and ended at `1.644, 0.733, 0.291`.
+
+### Full harness
+
+Cells are median / P95 milliseconds. Both binaries used `--depths 1`. The
+baseline omitted the new network-overhead fixture.
+
+| Scenario | Files | `29af7e7` baseline | `fb4dad0` candidate |
+| --- | ---: | ---: | ---: |
+| First run | 10,000 | 30.35 / 31.47 | **29.92 / 31.19** |
+| One parent layer | 10,000 | 23.48 / 24.87 | 23.17 / 25.90 |
+| 10-file diff | 10,000 | 5.98 / 6.25 | **5.63 / 5.80** |
+| First run | 200,000 | 178.81 / 185.85 | **124.45 / 129.62** |
+| One parent layer | 200,000 | 23.71 / 25.47 | 23.86 / 25.65 |
+| 10-file diff | 200,000 | 88.69 / 90.20 | 89.98 / 94.12 |
+
+The candidate passes the required gates: 10,000-file first run at 29.92 /
+31.19 ms against 60 / 80 ms, 200,000-file first run at 124.45 / 129.62 ms
+against 150 / 200 ms, 10,000-file diff median at 5.63 ms against 20 ms, and
+200,000-file diff median at 89.98 ms against 200 ms.
+
+The concurrent baseline 200,000-file first-run result was higher than earlier
+baseline rounds and is retained unchanged. The candidate was also remeasured
+against the same fixed baseline by the CLI harness rather than relabeling the
+baseline number.
+
+### One-parent baseline comparison
+
+The fixed one-parent step used the same 10,000-file fixture shape:
+
+| Binary | Preparation median | Measured step median / P95 |
+| --- | ---: | ---: |
+| `29af7e7` baseline | 30.52 ms | 23.22 / 24.12 ms |
+| `fb4dad0` candidate | 31.64 ms | 25.64 / 27.89 ms |
+
+The candidate added 2.42 ms to the median one-parent step in this run. The
+per-file-count one-parent rows above remain below the 55 ms tracking line.
+
+### Network namespace overhead
+
+The new paired mode used one shared 10,000-file workspace, 20 samples per
+policy, and one warm-up per policy. Each sample ran a fresh first step and then
+timed the second step with exactly one parent layer.
+
+| Scenario | Host median / P95 | `off` median / P95 | Off minus host median / P95 |
+| --- | ---: | ---: | ---: |
+| First run | 31.07 / 33.81 ms | 31.54 / 38.59 ms | **+0.47 / +4.77 ms** |
+| One parent layer | 24.65 / 26.51 ms | 25.04 / 51.35 ms | **+0.38 / +24.84 ms** |
+
+The median namespace cost is under 0.5 ms in both scenarios. P95 in this round
+contains two one-parent host-scheduler outliers; the raw samples include a
+53.01 ms host sample and a 67.85 ms off sample. They are retained rather than
+trimmed, and the median overhead is the stable observation.
+
+### Mixed-policy long session
+
+`scripts/acceptance_m2.py` completed 300 real-change steps with 279 `host`
+steps and 21 `off` steps. It compacted at steps 151 and 268, kept 35 mounted
+layers after each compaction, produced the same 16-entry diff before and after
+compaction, restored the step-100 policy snapshot after rollback, recorded an
+`off` policy on branch step 301, refused host drift with
+`COMMIT_CONFLICT`, committed 16 changes, and completed both commit-recovery
+fixtures.
+
+The run took 17,351.856 ms including network checks and the nested offline
+workflow. The acceptance debug binary SHA-256 was
+`d96bc3e61b0f28c51e7866602532a3ad87afa512533588fb275553d0fc3f0a4d`.
+
+### Criterion
+
+| Benchmark | Lower / estimate / upper |
+| --- | --- |
+| `diff_scan/10000_files_10_changes` | 3.8065 / **3.8276** / 3.8530 ms |
+| `rollback_dag/100_steps` | 10.176 / **10.391** / 10.622 ns |
+| `run_true/10000_files_end_to_end` | 27.825 / **28.457** / 29.242 ms |
+
+`diff_scan` improved by 2.52% (`p=0.00`), `rollback_dag` reported no change
+(`p=0.05`), and `run_true` reported no statistically significant change
+(`p=0.75`). The CLI harness remains authoritative for end-to-end comparisons.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| `cargo fmt --check` | passed |
+| workspace Clippy with `-D warnings` | passed |
+| `cargo test --workspace` | 126 passed |
+| forced-sandbox `adversarial_suite` | 39 passed, 0 failed, sequentially |
+| `bash scripts/smoke.sh` | passed |
+| network IPv4/IPv6 TCP/UDP host/off matrix | passed |
+| Cargo/npm/pip cold miss and warm hit | passed |
+
+Raw artifacts are in
+`/home/bangshou/cowbox-bench-results/m2-offline-final-20261116T070658Z/`.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Candidate release binary | `5fcd485054b69cfa4eefb7f645b9cc27e7b1698066f813ba991c971b73cfa648` |
+| Baseline release binary | `e991767788c3c0ca73ef390f8758ded544345491086dda3e352156eabe927796` |
+| `baseline-29af7e7.json` | `50d981998ca7442d50131df09118d3a849a07d4d9a88f42c6f474cc6dc3e0808` |
+| `baseline-29af7e7.md` | `3f857ac4f68e659a9709c4321f3076f05035ac8d624b2fc09e6f5c0a08000f9d` |
+| `candidate.json` | `fa7dc0a4f4c402514ad97eb203bae89c7a02e8180996dd2d889397f913ac7cab` |
+| `candidate.md` | `779108594a7ca0d1d9cb96586d8c311487b4fda0f0bf6cd19225650bfed31d32` |
+| `acceptance.json` | `5e27a1a6cb5fc10a38e9736f4db8fcee115d8f20f812a572149d4347a6433e48` |
+| `criterion/criterion.log` | `5633f987734e2854ccf4f776a1ad60fec309224704467d6fd16ddccdf50a7a8b` |
+
 ## How to run
 
 ```bash
@@ -1131,6 +1252,7 @@ bash scripts/bench-m2.sh \
   --long-session-steps 300 \
   --long-session-file-count 100 \
   --compaction-entries 10000 \
+  --network-overhead-files 10000 \
   --json-output "$HOME/cowbox-bench-results/cowbox-m2-diff-rerun-$stamp.json" \
   --markdown-output "$HOME/cowbox-bench-results/cowbox-m2-diff-rerun-$stamp.md"
 ```
@@ -1144,13 +1266,15 @@ result.
 
 Baseline binaries that predate layer compaction must be run with
 `--allow-legacy-layer-limit`. Candidate runs must omit that flag so an
-unexpected exit after step 151 fails the benchmark.
+unexpected exit after step 151 fails the benchmark. A baseline that predates
+`--network` must use `--network-overhead-files 0`. For source attribution,
+invoke that baseline harness from the corresponding baseline worktree.
 
 Use `--root /tmp/cowbox-m2-run --keep` to retain fixtures and states for
 inspection. Keep output files outside the disposable benchmark root.
 
-The real-change acceptance uses a debug binary because it injects a commit
-crash:
+The real-change acceptance uses a debug binary because it injects network and
+commit failures:
 
 ```bash
 root="$(mktemp -d /tmp/cowbox-m2-acceptance-XXXXXX)"
@@ -1158,6 +1282,14 @@ python3 scripts/acceptance_m2.py \
   --binary "$CARGO_TARGET_DIR/debug/cowbox" \
   --root "$root" \
   --json-output "$HOME/cowbox-bench-results/m2-acceptance-$stamp.json"
+```
+
+The standalone offline workflow is:
+
+```bash
+python3 scripts/offline_workflow.py \
+  --binary "$CARGO_TARGET_DIR/debug/cowbox" \
+  --json-output "$HOME/cowbox-bench-results/offline-$stamp.json"
 ```
 
 The Criterion microbenchmark remains available:

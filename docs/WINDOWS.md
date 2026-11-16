@@ -1,6 +1,6 @@
 # Windows
 
-cowbox M1.5 ships a native `cowbox.exe` launcher. The engine still runs in
+cowbox M2 ships a native `cowbox.exe` launcher. The engine still runs in
 WSL2; the project does not need to move out of `E:\...`.
 
 ## Install
@@ -9,6 +9,7 @@ WSL2; the project does not need to move out of `E:\...`.
 .\cowbox.exe setup
 cowbox doctor
 cowbox demo
+cowbox demo --offline
 ```
 
 `setup` downloads the matching Linux release into WSL `~/.local/bin/cowbox`,
@@ -28,6 +29,7 @@ Add `%USERPROFILE%\.local\bin` to `PATH` if `cowbox` is not found. Re-run
 cd E:\project\your-app
 cowbox init --agent
 cowbox run -- npm test
+cowbox run --network off -- cargo test
 cowbox diff
 cowbox commit
 ```
@@ -35,10 +37,15 @@ cowbox commit
 `cowbox.exe` calls `wsl.exe --cd <cwd>`, so the project is visible as
 `/mnt/e/project/your-app` inside WSL. State remains on WSL ext4.
 
-`cowbox doctor` forwards the Linux capability report. A machine that is reachable
-but not ready exits 1, prints every failed capability and note, and keeps the
-same JSON envelope under `--json`. WSL startup failures that produce no doctor
-response are reported separately as `WSL_START_FAILED`.
+`cowbox.exe` forwards every `doctor` argument, including
+`--check-run --network off`, through the same `wsl.exe` command shape used by
+`run`, `diff`, and the other engine commands. Linux stdout, stderr, and the exit
+code are preserved. The Windows launcher does not reinterpret the active-run
+JSON or its stage-specific failure codes.
+
+`cowbox demo --offline` runs the real demo command, diff, and rollback with
+network policy `off`. A host/IP connection is unavailable inside that step;
+filesystem-backed Unix sockets remain an IPC boundary.
 
 ## Agent skill
 
@@ -55,6 +62,6 @@ controls the default trigger policy. `cowbox install-rules` (or
 
 ## Boundary
 
-Codex Desktop's built-in file editor is still outside the WSL sandbox in M1.5.
+Codex Desktop's built-in file editor is still outside the WSL sandbox in M2.
 Commands routed through `cowbox` are protected; native Windows file-edit
 interception is a later milestone.

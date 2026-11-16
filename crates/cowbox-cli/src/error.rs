@@ -62,6 +62,15 @@ impl From<cowbox_core::CoreError> for CliError {
             CoreError::IsolationFailed(reason) => {
                 CliError::new("ISOLATION_FAILED", reason).exit(125)
             }
+            CoreError::UserNamespace(reason) => {
+                CliError::new("USER_NAMESPACE_FAILED", reason).exit(125)
+            }
+            CoreError::NetworkNamespace(reason) => {
+                CliError::new("NETWORK_NAMESPACE_FAILED", reason).exit(125)
+            }
+            CoreError::OverlayFilesystem(reason) => {
+                CliError::new("OVERLAYFS_FAILED", reason).exit(125)
+            }
             CoreError::Landlock(reason) => CliError::new("LANDLOCK_FAILED", reason).exit(125),
             CoreError::StateCorrupted { step, reason } => CliError::new(
                 "STATE_CORRUPTED",

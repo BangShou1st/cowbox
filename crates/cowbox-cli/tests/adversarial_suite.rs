@@ -3,6 +3,8 @@ use rusqlite::Connection;
 use rustix::fs::XattrFlags;
 use serde_json::Value;
 use std::fs;
+use std::io::{ErrorKind, Read, Write};
+use std::net::{TcpListener, UdpSocket};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -2272,6 +2274,195 @@ test "$(cat "$PIP_CACHE_DIR/session-only")" = "session pip""#,
     assert_eq!(
         fs::read_to_string(host_pip.join("marker")).expect("pip host marker"),
         "pip\n"
+    );
+}
+
+#[test]
+fn network_policy_controls_tcp_and_udp_connectivity_and_is_recorded() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    env.init();
+
+    let tcp_listener = TcpListener::bind(("127.0.0.1", 0)).expect("TCP listener");
+    let tcp_address = tcp_listener.local_addr().expect("TCP address");
+    let tcp_server = thread::spawn(move || {
+        let (mut stream, _) = tcp_listener.accept().expect("accept TCP connection");
+        let mut request = [0u8; 4];
+        stream.read_exact(&mut request).expect("read TCP request");
+        assert_eq!(&request, b"ping");
+        stream.write_all(b"pong").expect("write TCP response");
+    });
+    let host_tcp = format!(
+        r#"python3 - <<'PY'
+import socket
+with socket.create_connection(("127.0.0.1", {}), timeout=2) as stream:
+    stream.sendall(b"ping")
+    assert stream.recv(4) == b"pong"
+PY"#,
+        tcp_address.port()
+    );
+    let (code, host) = run_script(&env, &host_tcp);
+    assert_eq!(code, 0, "host TCP run failed: {host}");
+    assert_eq!(host["data"]["policy"]["network"].as_str(), Some("host"));
+    tcp_server.join().expect("TCP server");
+
+    let udp_server = UdpSocket::bind(("127.0.0.1", 0)).expect("UDP listener");
+    let udp_address = udp_server.local_addr().expect("UDP address");
+    let udp_thread = thread::spawn(move || {
+        let mut request = [0u8; 4];
+        let (count, peer) = udp_server.recv_from(&mut request).expect("receive UDP");
+        assert_eq!(count, 4);
+        assert_eq!(&request, b"ping");
+        udp_server.send_to(b"pong", peer).expect("reply UDP");
+    });
+    let host_udp = format!(
+        r#"python3 - <<'PY'
+import socket
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(2)
+sock.sendto(b"ping", ("127.0.0.1", {}))
+assert sock.recvfrom(4)[0] == b"pong"
+PY"#,
+        udp_address.port()
+    );
+    let (code, host) = run_script(&env, &host_udp);
+    assert_eq!(code, 0, "host UDP run failed: {host}");
+    udp_thread.join().expect("UDP server");
+
+    let isolated_tcp = TcpListener::bind(("127.0.0.1", 0)).expect("isolated TCP listener");
+    let isolated_tcp_address = isolated_tcp.local_addr().expect("isolated TCP address");
+    let off_tcp = format!(
+        r#"python3 - <<'PY'
+import socket
+sock = socket.socket()
+sock.settimeout(0.5)
+try:
+    sock.connect(("127.0.0.1", {}))
+except OSError:
+    raise SystemExit(0)
+raise SystemExit(7)
+PY"#,
+        isolated_tcp_address.port()
+    );
+    let (code, off) = env.json(&[
+        "run",
+        "--json",
+        "--network",
+        "off",
+        "--",
+        "sh",
+        "-c",
+        &off_tcp,
+    ]);
+    assert_eq!(code, 0, "off TCP probe was not isolated: {off}");
+    assert_eq!(off["data"]["policy"]["network"].as_str(), Some("off"));
+    isolated_tcp
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    assert_eq!(
+        isolated_tcp
+            .accept()
+            .expect_err("off connected to the host")
+            .kind(),
+        ErrorKind::WouldBlock
+    );
+
+    let (code, stats) = env.json(&["stats", "--json"]);
+    assert_eq!(code, 0, "stats failed: {stats}");
+    assert_eq!(stats["data"]["policy"]["network"].as_str(), Some("off"));
+    assert_eq!(stats["data"]["network_isolation"].as_bool(), Some(true));
+
+    let (code, rollback) = env.json(&["rollback", "1", "--json"]);
+    assert_eq!(code, 0, "rollback failed: {rollback}");
+    let (code, stats) = env.json(&["stats", "--json"]);
+    assert_eq!(code, 0, "stats after rollback failed: {stats}");
+    assert_eq!(stats["data"]["policy"]["network"].as_str(), Some("host"));
+
+    let (code, branch) = env.json(&["run", "--json", "--network", "off", "--", "true"]);
+    assert_eq!(code, 0, "policy branch failed: {branch}");
+    assert_eq!(branch["data"]["step"].as_u64(), Some(4));
+    let (code, stats) = env.json(&["stats", "--json"]);
+    assert_eq!(code, 0, "stats after branch failed: {stats}");
+    assert_eq!(stats["data"]["policy"]["network"].as_str(), Some("off"));
+
+    let markers = tempfile::tempdir_in("/tmp").expect("marker directory");
+    let marker = markers.path().join("command-started");
+    let command = format!("printf started > {}", marker.display());
+    let failed = fail_cowbox(
+        &env,
+        &[
+            "run",
+            "--json",
+            "--network",
+            "off",
+            "--allow-write",
+            &markers.path().to_string_lossy(),
+            "--",
+            "sh",
+            "-c",
+            &command,
+        ],
+        "network-namespace",
+    );
+    let value: Value = serde_json::from_slice(&failed.stdout).expect("network failure JSON");
+    assert_eq!(failed.status.code(), Some(125), "failure: {value}");
+    assert_eq!(
+        value["error"]["code"].as_str(),
+        Some("NETWORK_NAMESPACE_FAILED")
+    );
+    assert!(
+        !marker.exists(),
+        "user command started despite network namespace failure"
+    );
+}
+
+#[test]
+fn doctor_run_check_uses_the_real_pipeline_and_classifies_network_failure() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+
+    let (code, doctor) = env.json(&["doctor", "--check-run", "--network", "off", "--json"]);
+    assert_eq!(code, 0, "active doctor check failed: {doctor}");
+    assert_eq!(doctor["data"]["static_ready"].as_bool(), Some(true));
+    assert_eq!(doctor["data"]["ready"].as_bool(), Some(true));
+    let check = &doctor["data"]["run_check"];
+    assert_eq!(check["attempted"].as_bool(), Some(true));
+    assert_eq!(check["ready"].as_bool(), Some(true));
+    assert_eq!(check["network"].as_str(), Some("off"));
+    assert_eq!(check["command_started"].as_bool(), Some(true));
+    assert_eq!(check["stages"]["state_disk"].as_bool(), Some(true));
+    assert_eq!(check["stages"]["user_namespace"].as_bool(), Some(true));
+    assert_eq!(check["stages"]["network_namespace"].as_bool(), Some(true));
+    assert_eq!(check["stages"]["overlayfs"].as_bool(), Some(true));
+    assert_eq!(check["stages"]["landlock"].as_bool(), Some(true));
+    assert!(
+        doctor["data"]["capabilities"]["landlock_abi"]
+            .as_i64()
+            .is_some()
+    );
+
+    let failed = fail_cowbox(
+        &env,
+        &["doctor", "--check-run", "--network", "off", "--json"],
+        "network-namespace",
+    );
+    let value: Value = serde_json::from_slice(&failed.stdout).expect("doctor failure JSON");
+    assert_eq!(failed.status.code(), Some(1), "failure: {value}");
+    let check = &value["data"]["run_check"];
+    assert_eq!(check["attempted"].as_bool(), Some(true));
+    assert_eq!(check["ready"].as_bool(), Some(false));
+    assert_eq!(check["command_started"].as_bool(), Some(false));
+    assert_eq!(check["stages"]["user_namespace"].as_bool(), Some(true));
+    assert_eq!(check["stages"]["network_namespace"].as_bool(), Some(false));
+    assert_eq!(check["stages"]["overlayfs"].as_bool(), Some(true));
+    assert!(check["stages"]["landlock"].is_null());
+    assert_eq!(
+        check["error"]["code"].as_str(),
+        Some("NETWORK_NAMESPACE_FAILED")
     );
 }
 

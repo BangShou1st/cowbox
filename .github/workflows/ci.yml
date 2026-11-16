@@ -50,6 +50,9 @@ jobs:
       - name: Build all targets
         run: cargo check --workspace --all-targets
 
+      - name: Python script syntax
+        run: python3 -m py_compile scripts/*.py
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -97,6 +100,29 @@ jobs:
           "$GITHUB_WORKSPACE/target/debug/cowbox" --version
           "$GITHUB_WORKSPACE/target/debug/cowbox" doctor --json
           "$GITHUB_WORKSPACE/target/debug/cowbox" demo --json
+          "$GITHUB_WORKSPACE/target/debug/cowbox" demo --offline --json
+          "$GITHUB_WORKSPACE/target/debug/cowbox" doctor --check-run --network off --json \
+            > "$RUNNER_TEMP/doctor-active.json"
+          python3 - <<'PY'
+          import json, os
+          path = os.path.join(os.environ["RUNNER_TEMP"], "doctor-active.json")
+          report = json.load(open(path, encoding="utf-8"))
+          check = report["data"]["run_check"]
+          assert report["data"]["ready"] is True, report
+          assert check["ready"] is True, report
+          assert check["command_started"] is True, report
+          assert check["stages"]["network_namespace"] is True, report
+          PY
+          python3 scripts/offline_workflow.py \
+            --binary "$GITHUB_WORKSPACE/target/debug/cowbox" \
+            --json-output "$RUNNER_TEMP/offline-workflow.json"
+
+      - name: M2 long-session and network acceptance
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          python3 scripts/acceptance_m2.py \
+            --binary "$GITHUB_WORKSPACE/target/debug/cowbox" \
+            --json-output "$RUNNER_TEMP/acceptance-m2.json"
 
   benchmarks:
     name: benchmark compile / smoke

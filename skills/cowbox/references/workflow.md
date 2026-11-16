@@ -24,5 +24,7 @@ Use `cowbox discard --yes` to throw the session away. Long sessions compact
 older physical mount layers automatically at the OverlayFS limit while keeping
 the logical step DAG available for diff, commit, rollback, and branching.
 
-cowbox does not isolate the network or reverse remote database/service changes.
-It only protects the local workspace file tree.
+The default network policy is `host`. Add `--network off` when a command should
+run without IPv4/IPv6 TCP/UDP connectivity; filesystem-backed Unix sockets
+remain an IPC boundary. cowbox does not reverse remote database or service
+changes. It protects the local workspace file tree, not remote state.

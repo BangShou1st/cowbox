@@ -44,12 +44,20 @@ Status: preview released in `0.3.0-m1`.
 
 ## M2: stronger containment and scale
 
-Status: performance preview `0.4.0-m2` is published. Long-session layer
-compaction, read-only host cache reuse, and the regression round are on the
-pending merge candidate.
+Status: `0.5.0-m2` is the release candidate for this round. It includes
+long-session layer compaction, network-namespace isolation, active diagnostics,
+offline cache workflows, read-only host cache reuse, and the regression round.
 
-- [ ] Network policy via seccomp user notification or Landlock ABI 4+ where the
-  kernel supports it.
+- [x] `run --network host|off` with CLI, project, and default precedence.
+  `off` creates a private Linux network namespace after UID/GID mapping and
+  before the user command. IP connectivity is isolated; filesystem-backed Unix
+  sockets remain within the Landlock IPC boundary.
+- [x] Per-step effective-policy snapshots in `run --json` and `stats --json`,
+  including backward-compatible handling for older sessions.
+- [x] `doctor --check-run` through the real helper, namespace, OverlayFS,
+  state-disk, Landlock, and user-command path, with stage-specific failures.
+- [x] Offline `demo --offline` plus local Cargo, npm, and pip cold/hit fixture
+  coverage with host-cache hash checks.
 - [x] Long-session physical layer compaction with logical DAG, diff, rollback,
   branching, and commit semantics preserved.
 - [x] Read-only Cargo/npm/pip host cache reuse with session-local copy-up,
@@ -60,7 +68,10 @@ pending merge candidate.
   one warm-up, long-session boundaries, and measured disk growth.
 - [ ] Blocked-write audit counters (requires an interception layer, not Landlock
   alone).
-- [ ] Better `doctor` diagnostics for AppArmor, WSL config, and filesystem quirks.
+- [ ] Selective destination filtering and packet-level network policy. The M2
+  network namespace isolates connectivity but is not a firewall.
+- [ ] Additional `doctor` heuristics for AppArmor, WSL configuration, and
+  filesystem-specific quirks beyond the active startup chain.
 
 ## M3: agent integration
 

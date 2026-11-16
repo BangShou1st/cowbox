@@ -24,7 +24,8 @@ pub use error::{CoreError, Result};
 pub use layout::SessionLayout;
 pub use model::{
     Capabilities, ChangeKind, CommitOptions, CommitRecoveryAction, CommitReport, DiffOptions,
-    EntryKind, ExecOutcome, FileChange, LayerUsage, PendingRecovery, RecoveryReport, WhiteoutKind,
+    EntryKind, ExecOutcome, FileChange, LayerUsage, NetworkMode, PendingRecovery, RecoveryReport,
+    WhiteoutKind,
 };
 pub use policy::{ExecPolicy, HostCacheKind, HostCacheSource};
 

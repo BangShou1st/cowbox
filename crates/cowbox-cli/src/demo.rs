@@ -16,7 +16,7 @@ const DEMO_STEPS: usize = 2;
 pub fn run(args: &DemoArgs) -> CliResult<i32> {
     let started = Instant::now();
     let paths = DemoPaths::create()?;
-    let outcome = match execute(&paths, args.json, args.keep) {
+    let outcome = match execute(&paths, args.json, args.keep, args.offline) {
         Ok(outcome) => outcome,
         Err(error) => return Err(preserve_error(error, &paths)),
     };
@@ -36,6 +36,8 @@ pub fn run(args: &DemoArgs) -> CliResult<i32> {
                 "workspace": paths.workspace,
                 "state_home": paths.state_home,
                 "steps": DEMO_STEPS,
+                "offline": args.offline,
+                "network": if args.offline { "off" } else { "host" },
                 "summary": render::summary_json(&outcome.summary),
                 "host_unchanged": true,
                 "kept": kept,
@@ -47,6 +49,9 @@ pub fn run(args: &DemoArgs) -> CliResult<i32> {
             "demo passed in {duration_ms} ms: {} file(s) changed in the sandbox, host fixture unchanged.",
             outcome.summary.files
         );
+        if args.offline {
+            println!("offline mode used network policy `off` for the real sandbox run");
+        }
         if kept {
             println!("fixture kept at {}", paths.workspace.display());
             println!("state kept at {}", paths.state_home.display());
@@ -65,7 +70,12 @@ pub fn run(args: &DemoArgs) -> CliResult<i32> {
     Ok(0)
 }
 
-fn execute(paths: &DemoPaths, json_mode: bool, keep: bool) -> CliResult<DemoOutcome> {
+fn execute(
+    paths: &DemoPaths,
+    json_mode: bool,
+    keep: bool,
+    offline: bool,
+) -> CliResult<DemoOutcome> {
     let executable = std::env::current_exe()?;
     stage(json_mode, "Preparing isolated demo fixture");
     prepare_fixture(&paths.workspace)?;
@@ -94,10 +104,18 @@ fn execute(paths: &DemoPaths, json_mode: bool, keep: bool) -> CliResult<DemoOutc
     let baseline = snapshot_tree(&paths.workspace)?;
 
     stage(json_mode, "Breaking files inside the sandbox");
-    run_json(
-        &executable,
-        &paths.workspace,
-        &paths.state_home,
+    let destructive_args = if offline {
+        &[
+            "run",
+            "--json",
+            "--network",
+            "off",
+            "--",
+            "sh",
+            "-c",
+            "rm -rf src local-state && printf 'corrupted\\n' > BROKEN.md",
+        ][..]
+    } else {
         &[
             "run",
             "--json",
@@ -105,8 +123,20 @@ fn execute(paths: &DemoPaths, json_mode: bool, keep: bool) -> CliResult<DemoOutc
             "sh",
             "-c",
             "rm -rf src local-state && printf 'corrupted\\n' > BROKEN.md",
-        ],
+        ][..]
+    };
+    let destructive = run_json(
+        &executable,
+        &paths.workspace,
+        &paths.state_home,
+        destructive_args,
     )?;
+    if offline && destructive["data"]["policy"]["network"].as_str() != Some("off") {
+        return Err(CliError::new(
+            "DEMO_POLICY_FAILED",
+            "offline demo did not report network policy `off`",
+        ));
+    }
     ensure_host_unchanged(&paths.workspace, &baseline)?;
 
     stage(json_mode, "Inspecting net changes");
@@ -191,10 +221,18 @@ fn execute(paths: &DemoPaths, json_mode: bool, keep: bool) -> CliResult<DemoOutc
     ensure_host_unchanged(&paths.workspace, &baseline)?;
 
     stage(json_mode, "Verifying the restored sandbox view");
-    let verify = run_json(
-        &executable,
-        &paths.workspace,
-        &paths.state_home,
+    let verify_args = if offline {
+        &[
+            "run",
+            "--json",
+            "--network",
+            "off",
+            "--",
+            "sh",
+            "-c",
+            "test -f src/main.rs && test -f local-state/session.json && test ! -e BROKEN.md && printf 'restored\\n'",
+        ][..]
+    } else {
         &[
             "run",
             "--json",
@@ -202,7 +240,13 @@ fn execute(paths: &DemoPaths, json_mode: bool, keep: bool) -> CliResult<DemoOutc
             "sh",
             "-c",
             "test -f src/main.rs && test -f local-state/session.json && test ! -e BROKEN.md && printf 'restored\\n'",
-        ],
+        ][..]
+    };
+    let verify = run_json(
+        &executable,
+        &paths.workspace,
+        &paths.state_home,
+        verify_args,
     )?;
     if verify["data"]["stdout"].as_str() != Some("restored\n") {
         return Err(CliError::new(

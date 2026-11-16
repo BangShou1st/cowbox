@@ -4,10 +4,25 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.5.0-m2] - 2026-11-16
 
 ### Added
 
+- `cowbox run --network host|off` and `[sandbox] network` with CLI, project,
+  and default precedence. `off` creates a Linux network namespace after UID/GID
+  mapping and before the user command; setup failure is structured and never
+  falls back to the host network.
+- Per-step policy snapshots. `run --json` reports the effective policy,
+  `stats --json` reports the current DAG-head policy, rollback and branching
+  preserve step history, and old sessions deserialize with an unknown/legacy
+  policy.
+- `cowbox doctor --check-run [--network off]`, which runs the real CLI/helper
+  startup chain in a temporary fixture and distinguishes state-disk, user
+  namespace, network namespace, OverlayFS, and Landlock failures.
+- `cowbox demo --offline` for real execution, diff, and rollback under network
+  policy `off`.
+- `scripts/offline_workflow.py` with local Cargo, npm, and pip cold-miss/hit
+  fixtures, session cache writes, host-cache hash checks, diff, and undo.
 - Automatic physical layer compaction for long sessions. The logical snapshot
   DAG remains unchanged while older contiguous ancestor layers are merged at
   the 150-layer or lowerdir-length boundary. Compaction preserves char-device
@@ -26,6 +41,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `run` JSON adds `data.policy`; `stats` JSON adds `data.policy` and derives the
+  existing `network_isolation` field from the recorded snapshot.
+- The Windows launcher forwards all `doctor` arguments and preserves Linux
+  stdout, stderr, and exit codes through `wsl.exe`.
+- The M2 acceptance script now records source commit, binary SHA-256, machine
+  and tool environment, network/policy/offline results, and the full 300-step
+  mixed-policy session report.
+- The M2 benchmark harness measures host-vs-off network overhead with the same
+  10k-file fixture, 20 samples, and one warm-up.
 - `cowbox stats` preserves the existing `steps` field and adds `logical_steps`,
   `mounted_layers`, `compact_layers`, and `compacted_bytes`.
 - Session disk accounting includes compaction artifacts and host-cache overlay
@@ -41,6 +65,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Network and OverlayFS setup failures now return distinct
+  `NETWORK_NAMESPACE_FAILED` and `OVERLAYFS_FAILED` errors instead of a generic
+  isolation error.
+- Session discard now makes parent directories writable before descending, so
+  read-only host-cache overlay work directories cannot block cleanup.
 - Layer compaction now clears descendants when a higher layer replaces a
   directory with a file or symlink.
 - Compaction copies `user.*` xattrs before restoring read-only file or

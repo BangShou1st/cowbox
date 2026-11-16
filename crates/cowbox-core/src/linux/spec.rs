@@ -1,3 +1,4 @@
+use crate::NetworkMode;
 use crate::error::{CoreError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -21,6 +22,7 @@ pub struct RunSpec {
     pub isolate_caches: bool,
     pub extra_ro_paths: Vec<PathBuf>,
     pub extra_rw_paths: Vec<PathBuf>,
+    pub network: NetworkMode,
     pub cache_mounts: Vec<CacheMountSpec>,
     pub timeout_ms: Option<u64>,
     pub result_path: PathBuf,
@@ -46,6 +48,8 @@ pub struct ExecResult {
     pub orphans_reaped: usize,
     pub timed_out: bool,
     pub error: Option<String>,
+    #[serde(default)]
+    pub error_code: Option<String>,
 }
 
 impl ExecResult {
@@ -57,6 +61,14 @@ impl ExecResult {
             orphans_reaped: 0,
             timed_out: false,
             error: Some(message.into()),
+            error_code: None,
+        }
+    }
+
+    pub fn error_with_code(message: impl Into<String>, code: impl Into<String>) -> Self {
+        Self {
+            error_code: Some(code.into()),
+            ..Self::error(message)
         }
     }
 }

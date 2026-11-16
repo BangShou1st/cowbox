@@ -45,7 +45,7 @@ fn install_skill_uses_cowbox_subdirectory_and_list_shows_all_harnesses() {
     assert!(home.path().join(".codex/skills/cowbox/SKILL.md").is_file());
     let skill_text = fs::read_to_string(skill.join("SKILL.md")).expect("skill text");
     assert!(!skill_text.contains("untrusted scripts"));
-    assert!(skill_text.contains("does not isolate the network"));
+    assert!(skill_text.contains("run --network off"));
 
     let list = json_output(cowbox(&home, &project).args(["install-skill", "--list", "--json"]));
     let harnesses = list["data"]["harnesses"].as_array().expect("harness list");

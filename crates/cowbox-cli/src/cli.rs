@@ -1,5 +1,7 @@
 use crate::config::AgentMode;
+use clap::ValueEnum;
 use clap::{Args, Parser, Subcommand};
+use cowbox_core::NetworkMode;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -86,6 +88,8 @@ pub struct RunArgs {
     pub env: Vec<String>,
     #[arg(long)]
     pub clean_env: bool,
+    #[arg(long, value_enum)]
+    pub network: Option<NetworkModeArg>,
     #[arg(long)]
     pub json: bool,
     #[arg(long = "trace-chrome")]
@@ -160,6 +164,8 @@ pub struct CommitArgs {
 pub struct DemoArgs {
     #[arg(long)]
     pub json: bool,
+    #[arg(long, help = "Run the destructive demo step with network isolation")]
+    pub offline: bool,
     #[arg(long, help = "Keep the fixture and isolated state for inspection")]
     pub keep: bool,
 }
@@ -178,8 +184,27 @@ pub struct DiscardArgs {
 pub struct DoctorArgs {
     #[arg(long)]
     pub json: bool,
+    #[arg(long = "check-run")]
+    pub check_run: bool,
+    #[arg(long, value_enum, requires = "check_run")]
+    pub network: Option<NetworkModeArg>,
     #[arg(long = "trace-chrome")]
     pub trace_chrome: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum NetworkModeArg {
+    Host,
+    Off,
+}
+
+impl From<NetworkModeArg> for NetworkMode {
+    fn from(value: NetworkModeArg) -> Self {
+        match value {
+            NetworkModeArg::Host => Self::Host,
+            NetworkModeArg::Off => Self::Off,
+        }
+    }
 }
 
 #[derive(Debug, Args)]

@@ -12,7 +12,10 @@ use std::time::Duration;
 pub fn sandbox_exec_main() -> Result<()> {
     let (spec_path, spec) = load_spec()?;
     if let Err(error) = run_helper(&spec, &spec_path) {
-        let _ = write_result(&spec.result_path, &ExecResult::error(error.to_string()));
+        let _ = write_result(
+            &spec.result_path,
+            &ExecResult::error_with_code(error.to_string(), error.code()),
+        );
         return Err(error);
     }
     Ok(())
@@ -34,7 +37,7 @@ fn run_helper(spec: &RunSpec, spec_path: &std::path::Path) -> Result<()> {
 
     #[allow(deprecated)]
     unshare(UnshareFlags::NEWUSER).map_err(|error| {
-        CoreError::IsolationFailed(format!(
+        CoreError::UserNamespace(format!(
             "unshare(CLONE_NEWUSER) failed: {error}. Unprivileged user namespaces may be disabled."
         ))
     })?;
@@ -47,6 +50,10 @@ fn run_helper(spec: &RunSpec, spec_path: &std::path::Path) -> Result<()> {
         CoreError::IsolationFailed(format!("unshare(CLONE_NEWNS) failed: {error}"))
     })?;
     mount::mount_overlay(spec)?;
+
+    if spec.network.isolates_network() {
+        setup_network_namespace()?;
+    }
 
     #[allow(deprecated)]
     unshare(UnshareFlags::NEWPID).map_err(|error| {
@@ -74,6 +81,23 @@ fn run_helper(spec: &RunSpec, spec_path: &std::path::Path) -> Result<()> {
     let _ = fs::remove_dir_all(&spec.work_dir);
     let _ = fs::remove_dir_all(&spec.merged_dir);
     std::process::exit(code);
+}
+
+fn setup_network_namespace() -> Result<()> {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("COWBOX_TEST_FAIL").as_deref()
+        == Some(std::ffi::OsStr::new("network-namespace"))
+    {
+        return Err(CoreError::NetworkNamespace(
+            "injected failure after UID/GID mapping: network-namespace".to_string(),
+        ));
+    }
+    #[allow(deprecated)]
+    unshare(UnshareFlags::NEWNET).map_err(|error| {
+        CoreError::NetworkNamespace(format!(
+            "unshare(CLONE_NEWNET) failed: {error}. The kernel or security policy may disallow network namespaces."
+        ))
+    })
 }
 
 fn wait_for_go(go: &mut fs::File) -> Result<()> {

@@ -6,8 +6,10 @@ body:
   - type: markdown
     attributes:
       value: |
-        cowbox M1 intentionally excludes MCP, native Windows, macOS, network
-        isolation, and multi-agent racing. Please check docs/ROADMAP.md first.
+        cowbox M2 includes Linux network-namespace isolation, long sessions,
+        offline cache workflows, and active diagnostics. It excludes MCP,
+        native Windows, macOS, packet-filtering network policy, and multi-agent
+        racing. Please check docs/ROADMAP.md first.
   - type: textarea
     id: problem
     attributes:

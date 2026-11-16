@@ -1,6 +1,7 @@
+use crate::config::PolicySource;
 use crate::error::{CliError, CliResult};
 use crate::workspace::{self, ActivePointer};
-use cowbox_core::SessionLayout;
+use cowbox_core::{NetworkMode, SessionLayout};
 use cowbox_dag::SessionDag;
 use fs2::FileExt;
 use serde::de::DeserializeOwned;
@@ -40,7 +41,23 @@ pub struct SessionRecord {
     pub updated_at_unix_ms: i64,
     pub rollback_count: u64,
     pub last_commit_unix_ms: Option<i64>,
+    #[serde(default)]
+    pub run_policies: std::collections::BTreeMap<u64, RunPolicyRecord>,
     pub dag: SessionDag,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunPolicyRecord {
+    pub network: NetworkMode,
+    pub network_source: PolicySource,
+    pub isolated_caches: bool,
+    pub host_caches: Vec<String>,
+}
+
+impl SessionRecord {
+    pub fn current_run_policy(&self) -> Option<&RunPolicyRecord> {
+        self.run_policies.get(&self.dag.head_step)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +200,7 @@ impl SessionStore {
             updated_at_unix_ms: now,
             rollback_count: 0,
             last_commit_unix_ms: None,
+            run_policies: std::collections::BTreeMap::new(),
             dag: SessionDag::new(session_id, self.workspace.clone()),
         }
     }
@@ -452,4 +470,34 @@ fn directory_size(path: &Path) -> u64 {
         }
     }
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_session_without_policy_records_remains_readable() {
+        let mut record = SessionRecord {
+            schema_version: SESSION_SCHEMA_VERSION,
+            session_id: "legacy".to_string(),
+            workspace: PathBuf::from("/tmp/workspace"),
+            status: SessionStatus::Active,
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            rollback_count: 0,
+            last_commit_unix_ms: None,
+            run_policies: std::collections::BTreeMap::new(),
+            dag: SessionDag::new("legacy", "/tmp/workspace"),
+        };
+        let mut value = serde_json::to_value(&record).expect("serialize session");
+        value
+            .as_object_mut()
+            .expect("session object")
+            .remove("run_policies");
+        record = serde_json::from_value(value).expect("deserialize legacy session");
+
+        assert!(record.run_policies.is_empty());
+        assert!(record.current_run_policy().is_none());
+    }
 }

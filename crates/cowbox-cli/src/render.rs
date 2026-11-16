@@ -1,8 +1,12 @@
+#[cfg(not(windows))]
 use crate::doctor;
-use crate::doctor::HostCacheReport;
-use crate::state::SessionRecord;
+#[cfg(not(windows))]
+use crate::doctor::{HostCacheReport, RunCheckReport};
+use crate::state::{RunPolicyRecord, SessionRecord};
+#[cfg(not(windows))]
 use cowbox_core::Capabilities;
 use cowbox_core::{ChangeKind, EntryKind, FileChange};
+#[cfg(not(windows))]
 use std::path::Path;
 
 #[derive(Debug, Default)]
@@ -29,6 +33,7 @@ pub struct Stats {
     pub disk_bytes: u64,
     pub landlock_abi: Option<i32>,
     pub network_isolation: bool,
+    pub policy: Option<RunPolicyRecord>,
     pub blocked_writes: Option<u64>,
 }
 
@@ -190,12 +195,20 @@ pub fn print_stats(stats: &Stats) {
             .unwrap_or_else(|| "unknown".to_string())
     );
     println!(
-        "Network isolation: {}",
-        if stats.network_isolation {
-            "enabled"
-        } else {
-            "not available in M1"
-        }
+        "Network policy:    {}",
+        stats
+            .policy
+            .as_ref()
+            .map(|policy| format!(
+                "{} ({})",
+                policy.network.as_str(),
+                policy.network_source.as_str()
+            ))
+            .unwrap_or_else(|| "unknown (legacy session)".to_string())
+    );
+    println!(
+        "Network isolated:  {}",
+        if stats.network_isolation { "yes" } else { "no" }
     );
     println!(
         "Blocked writes:   {}",
@@ -206,6 +219,7 @@ pub fn print_stats(stats: &Stats) {
     );
 }
 
+#[cfg(not(windows))]
 pub fn print_doctor(
     capabilities: &Capabilities,
     state_root: &Path,
@@ -322,6 +336,50 @@ pub fn print_doctor(
     );
 }
 
+#[cfg(not(windows))]
+pub fn print_run_check(report: &RunCheckReport) {
+    println!();
+    println!(
+        "Active run check: {} (network policy: {})",
+        if report.ready { "READY" } else { "FAILED" },
+        report.network.as_str()
+    );
+    stage_line("State disk", Some(report.stages.state_disk));
+    stage_line("User namespace", report.stages.user_namespace);
+    stage_line("Network namespace", report.stages.network_namespace);
+    stage_line("OverlayFS", report.stages.overlayfs);
+    stage_line("Landlock", report.stages.landlock);
+    line(
+        "User command",
+        report.command_started,
+        if report.command_started {
+            "started"
+        } else {
+            "not started"
+        },
+    );
+    if let Some(error) = &report.error {
+        println!(
+            "  error: {}: {} (exit {})",
+            error.code,
+            error.message,
+            error
+                .exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn stage_line(label: &str, status: Option<bool>) {
+    match status {
+        Some(ok) => line(label, ok, if ok { "passed" } else { "failed" }),
+        None => println!("[--] {label}: not reached"),
+    }
+}
+
+#[cfg(not(windows))]
 fn line(label: &str, ok: bool, detail: &str) {
     println!("[{}] {label}: {detail}", if ok { "ok" } else { "!!" });
 }
