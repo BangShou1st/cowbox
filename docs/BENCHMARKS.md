@@ -517,6 +517,129 @@ is reported without a regression or improvement claim. The final fixed release
 binary used for the path scenarios had SHA-256
 `736367338b2003b9b7f4dcf32be1a8aa9ee2b5c2dfbf7bd21d384e91e5c14ced`.
 
+## M2 execution-step integration round
+
+This round uses `f86b72a` as the performance baseline. It integrates the
+first-session manifest capture experiment from `5c133ea` and the supervisor
+wait work preserved in
+`/home/bangshou/cowbox-bench-results/m2-exec-step-20261115T205234Z/`.
+The earlier experiment remains the historical source for two ideas:
+
+- persist the first-session manifest from workers without handing every parsed
+  entry back to the main thread;
+- wait for command exit with a pidfd instead of a fixed 10 ms poll.
+
+The production integration additionally keeps a polling fallback when pidfd
+creation is unavailable and checks the direct child again after a poll timeout
+before deciding that the command timed out. The manifest path retains complete
+tree coverage, global path ordering, no-follow symlink handling, xattr digests,
+hardlink metadata, and JSONL compatibility. The archived `REPORT.md` and
+`0001-perf-wait-for-command-exit-with-pidfd.patch` remain the context for the
+earlier 46.60/156.65 ms and 46.59/124.07 ms candidate measurements; they are not
+relabeled as this round's results.
+
+The measured candidate source was commit
+`1dd203a4c995bf667d3b0752be1520c56ba9d2b5` plus `source.patch` from the artifact
+directory. The commit containing this section records the same source. Raw
+results, logs, binaries, and the exact patch are retained in
+`/home/bangshou/cowbox-bench-results/m2-final-20261116T010646Z/`.
+The three implementation commits are `c7e4b83` for Windows doctor forwarding,
+`1dd203a` for the supervisor wait, and the commit containing this section for
+the manifest integration and final measurements.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Baseline `f86b72a` binary | `90b8f2e8635b967fc2c7af15ae834ded0550cd0ca2804b76c19511710b7ea06b` |
+| Final candidate binary | `38cafdb1acb082bf209463e5b2b4ca3c68a97cda0306446ebf5791b831f89955` |
+| Measured source patch | `1a7b39a5c00ed11003c47a06485d132f3808c82b5ee7820136842b7e811ab30c` |
+| Formal paired A/B JSON | `c060101e76bb37ad07851f0bd55cf345d4031d9d1ae82da1ada1aa59bb0e5647` |
+| Full harness JSON | `b05559aa87eb4bedfe2920def158a63d9c977f6f92e5513d949b1088c401d97f` |
+| Excluded first paired A/B JSON | `010d5a421805576d1c637e5a63c5e3620cd300019f46a33a76e88c456f808a4d` |
+
+### Measurement protocol
+
+Both binaries were built from separate ext4 target directories with the
+workspace release profile. Each file count used one shared fixture generated
+under ext4, 20 measured samples, one excluded warm-up, and alternating
+baseline/candidate order. The full harness used the same final binary, fixture
+generator, sample count, and warm-up count, with `--depths 1`. No sample was
+removed or winsorized.
+
+### Paired first-run A/B
+
+Cells are median / P95 in milliseconds. The paired delta is candidate minus
+baseline.
+
+| First run | Baseline | Final candidate | Paired delta |
+| --- | ---: | ---: | ---: |
+| 10,000 files | 49.44 / 62.17 ms | **37.65 / 50.43 ms** | -10.21 / -2.78 ms |
+| 200,000 files | 168.67 / 194.73 ms | **135.57 / 170.45 ms** | -36.61 / -20.93 ms |
+
+The formal run started at load average `1.047, 1.071, 0.540` and ended at
+`1.107, 1.083, 0.556`. Both first-run median and P95 targets pass:
+10,000 files at 60/80 ms and 200,000 files at 150/200 ms.
+
+An earlier paired run was excluded after the WSL storage layer restarted during
+the measurement window. Its load average started at `2.696, 1.238, 0.541`;
+both sides slowed by roughly the same factor, the candidate measured
+187.72/257.00 ms at 200,000 files, and the benchmark's temporary metadata path
+was cleared. `logs/wsl-dmesg-after-paired.txt` records p9io cancellation and
+ext4 unmount/remount events surrounding that window. The excluded JSON remains
+available for audit and is not used in the table above.
+
+### Full harness
+
+| Scenario | 10,000 files | 200,000 files |
+| --- | ---: | ---: |
+| First run | **37.02 / 43.65 ms** | **143.08 / 169.98 ms** |
+| Subsequent run, 1 layer | **30.22 / 32.98 ms** | **27.69 / 32.01 ms** |
+| 10-file diff | **7.96 / 12.78 ms** | **105.29 / 113.25 ms** |
+
+The fixed one-parent step measured 28.38 / 31.86 ms after a 36.48 ms untimed
+preparation step. The layer-limit probe accepted a step from 150 active layers
+in 41.96 ms, then rejected the next invocation from 151 layers with exit 2 after
+2.30 ms; head remained 151 and step 152 was not created.
+
+The 10-file diff targets pass at both sizes (10,000 files <=20 ms and 200,000
+files <=200 ms). The full harness started at load average
+`0.937, 1.046, 0.549` and ended at `1.267, 1.121, 0.591`.
+
+### Verification
+
+The final tree passed:
+
+| Check | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | passed |
+| workspace Clippy with `-D warnings` | passed |
+| `cargo test --workspace` | 97 passed |
+| forced-sandbox `adversarial_suite` | 26 passed, 0 ignored |
+| `bash scripts/smoke.sh` | passed: init -> run -> diff -> rollback -> commit --dry-run |
+
+The relevant Criterion run completed with these lower / estimate / upper
+intervals:
+
+| Benchmark | Samples | Measured |
+| --- | ---: | --- |
+| `diff_scan/10000_files_10_changes` | 20 | 4.3558 / **4.4126** / 4.4643 ms |
+| `rollback_dag/100_steps` | 20 | 10.478 / **10.627** / 10.875 ns |
+| `run_true/10000_files_end_to_end` | 10 | 28.952 / **30.334** / 31.727 ms |
+
+Criterion reported a 10.22% increase for `diff_scan` and a 6.44% increase for
+`rollback_dag` against its previously stored samples, and a 26.72% improvement
+for `run_true`. Those comparisons are across separate Criterion sessions rather
+than a fresh `f86b72a` Criterion run. The CLI harness measured the 10-file diff
+inside the target and did not reproduce a diff regression in this round.
+
+The Windows release launcher also passed a separate build and real
+`cowbox.exe -> wsl.exe -> cowbox-final` validation. Its SHA-256 was
+`462459d361b47005d316fba5b7e83f4012befe5f6e6125c8cb9b9636d3d505de`.
+The ready capability path exited 0. A 9p `COWBOX_HOME` path exited 1 while
+printing every failed check and the migration note, and `doctor --json` retained
+`ok=true`, `ready=false`, `state_fs=9p`, and the inspected `state_root`. A
+missing WSL distribution produced `WSL_START_FAILED` with exit 1 instead of a
+capability diagnostic.
+
 ## How to run
 
 ```bash

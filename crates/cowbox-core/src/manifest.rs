@@ -81,7 +81,21 @@ pub fn capture_base_manifest(root: &Path, output: &Path) -> Result<Vec<ManifestE
         fs::create_dir_all(parent)?;
     }
     let file = File::create(output)?;
-    capture_manifest(root, &file)
+    capture_manifest(root, &file, true)?.ok_or_else(|| CoreError::StateCorrupted {
+        step: 0,
+        reason: "manifest capture omitted collected entries".to_string(),
+    })
+}
+
+pub(crate) fn capture_base_manifest_file(root: &Path, output: &Path) -> Result<()> {
+    // Session initialization needs the persisted bytes but not the parsed
+    // entries, so workers can release each entry immediately after
+    // serialization instead of handing it to the main thread.
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = File::create(output)?;
+    capture_manifest(root, &file, false).map(|_| ())
 }
 
 pub fn load_manifest(path: &Path) -> Result<BTreeMap<PathBuf, ManifestEntry>> {
@@ -261,19 +275,24 @@ struct CapturePacket {
 }
 
 struct CapturedDirectory {
-    entries: Vec<ManifestEntry>,
+    entries: Option<Vec<ManifestEntry>>,
     jsonl: Vec<u8>,
-    jsonl_ends: Vec<usize>,
+    directory_ends: Vec<usize>,
+    child_paths: Vec<PathBuf>,
 }
 
-fn capture_manifest(root: &Path, file: &File) -> Result<Vec<ManifestEntry>> {
+fn capture_manifest(
+    root: &Path,
+    file: &File,
+    retain_entries: bool,
+) -> Result<Option<Vec<ManifestEntry>>> {
     let mut frontier = vec![CaptureTask {
         directory: root.to_path_buf(),
         rel_path: PathBuf::new(),
     }];
     let mut directories = BTreeMap::new();
     while !frontier.is_empty() {
-        let packets = capture_frontier(&frontier)?;
+        let packets = capture_frontier(&frontier, retain_entries)?;
         let mut next_frontier = Vec::new();
         for packet in packets {
             let rel_path = frontier[packet.task_index].rel_path.clone();
@@ -283,14 +302,15 @@ fn capture_manifest(root: &Path, file: &File) -> Result<Vec<ManifestEntry>> {
         next_frontier.sort_unstable_by(|left, right| left.rel_path.cmp(&right.rel_path));
         frontier = next_frontier;
     }
-    write_ordered_entries(root, directories, file)
+    write_ordered_entries(root, directories, file, retain_entries)
 }
 
 fn write_ordered_entries(
     root: &Path,
     mut directories: BTreeMap<PathBuf, CapturedDirectory>,
     file: &File,
-) -> Result<Vec<ManifestEntry>> {
+    retain_entries: bool,
+) -> Result<Option<Vec<ManifestEntry>>> {
     let root_entries =
         directories
             .remove(Path::new(""))
@@ -299,29 +319,74 @@ fn write_ordered_entries(
                 reason: format!("manifest capture omitted {}", root.display()),
             })?;
     let mut stack = vec![DirectoryCursor::new(root_entries)];
-    let mut entries = Vec::new();
+    let total_entries = directories
+        .values()
+        .filter_map(|directory| directory.entries.as_ref())
+        .map(Vec::len)
+        .sum::<usize>()
+        + stack[0].entries.as_ref().map_or(0, |entries| entries.len());
+    let mut entries = retain_entries.then(|| Vec::with_capacity(total_entries));
     let mut writer = BufWriter::with_capacity(1024 * 1024, file);
-    while let Some(cursor) = stack.last_mut() {
-        let Some(entry) = cursor.entries.next() else {
-            if cursor.jsonl_ends.next().is_some() || cursor.start != cursor.jsonl.len() {
-                return Err(CoreError::StateCorrupted {
-                    step: 0,
-                    reason: "manifest serialization offsets were inconsistent".to_string(),
-                });
+    loop {
+        let mut child = None;
+        let mut pop = false;
+        if let Some(cursor) = stack.last_mut() {
+            if let Some(end) = cursor.directory_ends.get(cursor.directory_index).copied() {
+                let expected_child = cursor.child_paths.get(cursor.directory_index).cloned();
+                let Some(expected_child) = expected_child else {
+                    return Err(CoreError::StateCorrupted {
+                        step: 0,
+                        reason: "manifest serialization child offsets were inconsistent"
+                            .to_string(),
+                    });
+                };
+                if let Some(entries_iter) = cursor.entries.as_mut() {
+                    let mut child_path = None;
+                    for entry in entries_iter.by_ref() {
+                        let is_directory = entry.kind == EntryKind::Directory;
+                        if is_directory {
+                            child_path = Some(entry.rel_path.clone());
+                        }
+                        if let Some(entries) = entries.as_mut() {
+                            entries.push(entry);
+                        }
+                        if is_directory {
+                            break;
+                        }
+                    }
+                    if child_path.as_deref() != Some(expected_child.as_path()) {
+                        return Err(CoreError::StateCorrupted {
+                            step: 0,
+                            reason: "manifest serialization directory order was inconsistent"
+                                .to_string(),
+                        });
+                    }
+                }
+                if end > cursor.jsonl.len() || end < cursor.start {
+                    return Err(CoreError::StateCorrupted {
+                        step: 0,
+                        reason: "manifest serialization offsets were inconsistent".to_string(),
+                    });
+                }
+                writer.write_all(&cursor.jsonl[cursor.start..end])?;
+                cursor.start = end;
+                cursor.directory_index += 1;
+                child = Some(expected_child);
+            } else {
+                if let Some(entries_iter) = cursor.entries.as_mut() {
+                    for entry in entries_iter.by_ref() {
+                        if let Some(entries) = entries.as_mut() {
+                            entries.push(entry);
+                        }
+                    }
+                }
+                writer.write_all(&cursor.jsonl[cursor.start..])?;
+                cursor.start = cursor.jsonl.len();
+                pop = true;
             }
-            stack.pop();
-            continue;
-        };
-        let Some(end) = cursor.jsonl_ends.next() else {
-            return Err(CoreError::StateCorrupted {
-                step: 0,
-                reason: "manifest serialization was missing an entry".to_string(),
-            });
-        };
-        writer.write_all(&cursor.jsonl[cursor.start..end])?;
-        cursor.start = end;
-        let child = (entry.kind == EntryKind::Directory).then(|| entry.rel_path.clone());
-        entries.push(entry);
+        } else {
+            break;
+        }
         if let Some(child) = child {
             let child_entries =
                 directories
@@ -331,6 +396,8 @@ fn write_ordered_entries(
                         reason: format!("manifest capture omitted directory {}", child.display()),
                     })?;
             stack.push(DirectoryCursor::new(child_entries));
+        } else if pop {
+            stack.pop();
         }
     }
     writer.flush()?;
@@ -347,41 +414,49 @@ fn write_ordered_entries(
 }
 
 struct DirectoryCursor {
-    entries: std::vec::IntoIter<ManifestEntry>,
+    entries: Option<std::vec::IntoIter<ManifestEntry>>,
     jsonl: Vec<u8>,
-    jsonl_ends: std::vec::IntoIter<usize>,
+    directory_ends: Vec<usize>,
+    child_paths: Vec<PathBuf>,
+    directory_index: usize,
     start: usize,
 }
 
 impl DirectoryCursor {
     fn new(directory: CapturedDirectory) -> Self {
         Self {
-            entries: directory.entries.into_iter(),
+            entries: directory.entries.map(Vec::into_iter),
             jsonl: directory.jsonl,
-            jsonl_ends: directory.jsonl_ends.into_iter(),
+            directory_ends: directory.directory_ends,
+            child_paths: directory.child_paths,
+            directory_index: 0,
             start: 0,
         }
     }
 }
 
-fn serialize_entries(entries: &[ManifestEntry]) -> Result<(Vec<u8>, Vec<usize>)> {
-    let mut output = Vec::with_capacity(entries.len().saturating_mul(220));
-    let mut ends = Vec::with_capacity(entries.len());
-    for entry in entries {
-        serde_json::to_writer(&mut output, entry)?;
-        output.push(b'\n');
-        ends.push(output.len());
+fn append_serialized_entry(
+    entry: &ManifestEntry,
+    output: &mut Vec<u8>,
+    directory_ends: &mut Vec<usize>,
+    child_paths: &mut Vec<PathBuf>,
+) -> Result<()> {
+    serde_json::to_writer(&mut *output, entry)?;
+    output.push(b'\n');
+    if entry.kind == EntryKind::Directory {
+        directory_ends.push(output.len());
+        child_paths.push(entry.rel_path.clone());
     }
-    Ok((output, ends))
+    Ok(())
 }
 
-fn capture_frontier(tasks: &[CaptureTask]) -> Result<Vec<CapturePacket>> {
+fn capture_frontier(tasks: &[CaptureTask], retain_entries: bool) -> Result<Vec<CapturePacket>> {
     let worker_count = capture_worker_count(tasks.len());
     if worker_count == 1 {
         return tasks
             .iter()
             .enumerate()
-            .map(|(task_index, task)| capture_task(task_index, task))
+            .map(|(task_index, task)| capture_task(task_index, task, retain_entries))
             .collect();
     }
 
@@ -398,7 +473,7 @@ fn capture_frontier(tasks: &[CaptureTask]) -> Result<Vec<CapturePacket>> {
                     let Some(task) = tasks.get(task_index) else {
                         break;
                     };
-                    let packet = match capture_task(task_index, task) {
+                    let packet = match capture_task(task_index, task, retain_entries) {
                         Ok(packet) => packet,
                         Err(error) => {
                             let _ = sender.send(Err(error));
@@ -448,7 +523,11 @@ fn capture_frontier(tasks: &[CaptureTask]) -> Result<Vec<CapturePacket>> {
     })
 }
 
-fn capture_task(task_index: usize, task: &CaptureTask) -> Result<CapturePacket> {
+fn capture_task(
+    task_index: usize,
+    task: &CaptureTask,
+    retain_entries: bool,
+) -> Result<CapturePacket> {
     let reader = fs::read_dir(&task.directory).map_err(|error| CoreError::StateCorrupted {
         step: 0,
         reason: format!(
@@ -456,8 +535,8 @@ fn capture_task(task_index: usize, task: &CaptureTask) -> Result<CapturePacket> 
             task.directory.display()
         ),
     })?;
-    let mut entries = Vec::new();
     let mut children = Vec::new();
+    let mut items = Vec::new();
     for item in reader {
         let item = item.map_err(|error| CoreError::StateCorrupted {
             step: 0,
@@ -467,6 +546,14 @@ fn capture_task(task_index: usize, task: &CaptureTask) -> Result<CapturePacket> 
         if is_skipped_name(&name) {
             continue;
         }
+        items.push((name, item));
+    }
+    items.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let mut entries = retain_entries.then(|| Vec::with_capacity(items.len()));
+    let mut jsonl = Vec::with_capacity(items.len().saturating_mul(220));
+    let mut directory_ends = Vec::new();
+    let mut child_paths = Vec::new();
+    for (name, item) in items {
         let path = item.path();
         let metadata = fs::symlink_metadata(&path)?;
         if !metadata.is_file() && !metadata.is_dir() && !metadata.is_symlink() {
@@ -479,17 +566,19 @@ fn capture_task(task_index: usize, task: &CaptureTask) -> Result<CapturePacket> 
                 rel_path: rel_path.clone(),
             });
         }
-        entries.push(ManifestEntry::from_metadata(rel_path, &path, &metadata)?);
+        let entry = ManifestEntry::from_metadata(rel_path, &path, &metadata)?;
+        append_serialized_entry(&entry, &mut jsonl, &mut directory_ends, &mut child_paths)?;
+        if let Some(entries) = entries.as_mut() {
+            entries.push(entry);
+        }
     }
-    entries.sort_unstable_by(|left, right| left.rel_path.cmp(&right.rel_path));
-    children.sort_unstable_by(|left, right| left.rel_path.cmp(&right.rel_path));
-    let (jsonl, jsonl_ends) = serialize_entries(&entries)?;
     Ok(CapturePacket {
         task_index,
         directory: CapturedDirectory {
             entries,
             jsonl,
-            jsonl_ends,
+            directory_ends,
+            child_paths,
         },
         children,
     })
@@ -504,4 +593,152 @@ fn capture_worker_count(task_count: usize) -> usize {
 
 fn is_skipped_name(name: &OsStr) -> bool {
     name == OsStr::new(".git") || name == OsStr::new(".cowbox")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustix::fs::XattrFlags;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn file_only_capture_matches_collected_manifest_bytes() {
+        let root = tempfile::Builder::new()
+            .prefix("cowbox-manifest-file-")
+            .tempdir_in("/tmp")
+            .expect("fixture");
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(workspace.join("branches/b/deep")).expect("directories");
+        fs::create_dir_all(workspace.join("branches/a")).expect("directories");
+        fs::write(workspace.join("branches/a.txt"), "sibling\n").expect("file");
+        fs::write(workspace.join("branches/b/deep/value.txt"), "value\n").expect("file");
+        fs::hard_link(
+            workspace.join("branches/b/deep/value.txt"),
+            workspace.join("branches/b/hardlink.txt"),
+        )
+        .expect("hardlink");
+        rustix::fs::lsetxattr(
+            workspace.join("branches/a.txt"),
+            &b"user.cowbox.test"[..],
+            b"present",
+            XattrFlags::empty(),
+        )
+        .expect("xattr");
+        symlink("branches/b/deep", workspace.join("link")).expect("symlink");
+
+        let collected = root.path().join("collected.jsonl");
+        let file_only = root.path().join("file-only.jsonl");
+        let entries = capture_base_manifest(&workspace, &collected).expect("collected capture");
+        capture_base_manifest_file(&workspace, &file_only).expect("file-only capture");
+        assert_eq!(
+            fs::read(&collected).expect("collected bytes"),
+            fs::read(&file_only).expect("file-only bytes")
+        );
+
+        let paths = entries
+            .iter()
+            .map(|entry| entry.rel_path.clone())
+            .collect::<Vec<_>>();
+        let persisted_paths = fs::read_to_string(&file_only)
+            .expect("manifest text")
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<ManifestEntry>(line)
+                    .expect("manifest line")
+                    .rel_path
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(paths, persisted_paths);
+        assert_eq!(
+            persisted_paths,
+            [
+                "branches",
+                "branches/a",
+                "branches/a.txt",
+                "branches/b",
+                "branches/b/deep",
+                "branches/b/deep/value.txt",
+                "branches/b/hardlink.txt",
+                "link",
+            ]
+            .map(PathBuf::from)
+        );
+        assert_eq!(
+            persisted_paths
+                .iter()
+                .filter(|path| path.as_path() == Path::new("link"))
+                .count(),
+            1
+        );
+        assert!(
+            !persisted_paths
+                .iter()
+                .any(|path| { path.as_path() != Path::new("link") && path.starts_with("link") })
+        );
+    }
+
+    #[test]
+    fn file_only_capture_matches_a_wide_parallel_manifest() {
+        let root = tempfile::Builder::new()
+            .prefix("cowbox-manifest-wide-")
+            .tempdir_in("/tmp")
+            .expect("fixture");
+        let workspace = root.path().join("workspace");
+        for branch in 0..40 {
+            let directory = workspace.join(format!("branches/branch-{branch:02}/deep/nested"));
+            fs::create_dir_all(&directory).expect("directories");
+            fs::write(directory.join("payload.txt"), format!("branch {branch}\n"))
+                .expect("payload");
+        }
+        fs::write(workspace.join("z-root.txt"), "root\n").expect("root file");
+        symlink(".", workspace.join("loop")).expect("symlink");
+        rustix::fs::lsetxattr(
+            workspace.join("z-root.txt"),
+            &b"user.cowbox.test"[..],
+            b"present",
+            XattrFlags::empty(),
+        )
+        .expect("xattr");
+        fs::hard_link(
+            workspace.join("branches/branch-00/deep/nested/payload.txt"),
+            workspace.join("branches/branch-00/hardlink.txt"),
+        )
+        .expect("hardlink");
+
+        let collected = root.path().join("wide-collected.jsonl");
+        let file_only = root.path().join("wide-file-only.jsonl");
+        let entries = capture_base_manifest(&workspace, &collected).expect("collected capture");
+        capture_base_manifest_file(&workspace, &file_only).expect("file-only capture");
+        assert_eq!(
+            fs::read(&collected).expect("collected bytes"),
+            fs::read(&file_only).expect("file-only bytes")
+        );
+
+        let paths = entries
+            .iter()
+            .map(|entry| entry.rel_path.clone())
+            .collect::<Vec<_>>();
+        let mut sorted_paths = paths.clone();
+        sorted_paths.sort();
+        assert_eq!(
+            paths, sorted_paths,
+            "manifest paths were not globally sorted"
+        );
+        let persisted_paths = fs::read_to_string(&file_only)
+            .expect("manifest text")
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<ManifestEntry>(line)
+                    .expect("manifest line")
+                    .rel_path
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(persisted_paths, paths);
+        assert_eq!(paths.len(), 40 * 4 + 4);
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.as_path() != Path::new("loop") && path.starts_with("loop"))
+        );
+    }
 }
