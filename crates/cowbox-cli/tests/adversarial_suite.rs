@@ -1540,7 +1540,8 @@ PY"#,
     );
     let (code, view) = run_script(
         &env,
-        r#"test ! -e delete.txt
+        r#"set -e
+test ! -e delete.txt
 test -f added.txt
 test "$(cat modify.txt)" = new
 test "$(cat swap)" = "now a file"
@@ -1568,6 +1569,46 @@ PY"#,
         branched_diff["data"]["changes"], before_changes,
         "branching from the old snapshot did not preserve the logical diff"
     );
+}
+
+#[test]
+fn unreadable_file_survives_compaction() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    env.init();
+    let (code, first) = run_script(
+        &env,
+        r#"printf 'locked contents\n' > locked.txt
+python3 - <<'PY'
+import os
+os.setxattr("locked.txt", b"user.cowbox.test", b"locked")
+os.chmod("locked.txt", 0o000)
+PY"#,
+    );
+    assert_eq!(code, 0, "locked-file run failed: {first}");
+    for expected in 2..=151 {
+        let (code, run) = env.json(&["run", "--json", "--", "true"]);
+        assert_eq!(code, 0, "long-session step {expected} failed: {run}");
+        assert_eq!(run["data"]["step"].as_u64(), Some(expected));
+    }
+    let (code, stats) = env.json(&["stats", "--json"]);
+    assert_eq!(code, 0, "stats failed: {stats}");
+    assert_eq!(stats["data"]["logical_steps"].as_u64(), Some(151));
+    assert_eq!(stats["data"]["compact_layers"].as_u64(), Some(1));
+
+    let (code, view) = run_script(
+        &env,
+        r#"set -e
+python3 - <<'PY'
+import os
+assert open("locked.txt", encoding="utf-8").read() == "locked contents\n"
+assert os.getxattr("locked.txt", b"user.cowbox.test") == b"locked"
+assert os.stat("locked.txt").st_mode & 0o777 == 0
+PY"#,
+    );
+    assert_eq!(code, 0, "locked file changed after compaction: {view}");
 }
 
 #[test]

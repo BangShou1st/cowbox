@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::ops::Bound::{Excluded, Unbounded};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
@@ -23,6 +23,7 @@ pub(crate) const MAX_LOWERDIR_BYTES: usize = 3800;
 const COMPACTION_SCHEMA_VERSION: u32 = 1;
 const KEEP_RECENT_LAYERS: usize = 32;
 const OPAQUE_XATTR: &[u8] = b"user.overlay.opaque";
+const PERMISSION_JOURNAL: &str = "source-permissions.jsonl";
 
 #[derive(Debug, Clone)]
 pub(crate) struct MountLayer {
@@ -82,9 +83,48 @@ struct EffectiveState {
     opaques: BTreeSet<PathBuf>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PermissionRecord {
+    path: PathBuf,
+    mode: u32,
+}
+
+#[derive(Debug)]
+struct AccessRecords {
+    session_dir: PathBuf,
+    journal: Option<PathBuf>,
+    records: Vec<PermissionRecord>,
+    overrides: HashMap<PathBuf, u32>,
+    restored: bool,
+}
+
+impl AccessRecords {
+    fn restore(&mut self) -> Result<()> {
+        if self.restored {
+            return Ok(());
+        }
+        restore_permission_records(&self.session_dir, &self.records)?;
+        if let Some(journal) = self.journal.take() {
+            match fs::remove_file(&journal) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        self.restored = true;
+        Ok(())
+    }
+}
+
+impl Drop for AccessRecords {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
 #[derive(Debug)]
 enum DirectorySource {
-    Layer(PathBuf),
+    Layer(PathBuf, u32),
     Base(PathBuf),
     Generated,
 }
@@ -317,13 +357,31 @@ fn build_compacted_layer(
         .iter()
         .map(|layer| layer.upper_dir.clone())
         .collect::<Vec<_>>();
+    let permission_journal = temp_root.join(PERMISSION_JOURNAL);
+    let mut source_access =
+        prepare_access(layout, &source_dirs, Some(permission_journal.as_path()))?;
     let result = (|| -> Result<CompactionMetadata> {
-        let expected = analyze_layers(&source_dirs)?;
-        materialize(&expected, &temp_upper, layout)?;
+        let expected = analyze_layers_with_modes(&source_dirs, Some(&source_access.overrides))
+            .map_err(|error| compaction_phase("analyze source layers", error))?;
+        materialize(&expected, &temp_upper, layout)
+            .map_err(|error| compaction_phase("materialize compacted layer", error))?;
         test_crash("compaction-after-materialize");
 
-        let actual = analyze_layers(std::slice::from_ref(&temp_upper))?;
-        validate(&expected, &actual, layout)?;
+        let mut temp_access = prepare_access(layout, std::slice::from_ref(&temp_upper), None)
+            .map_err(|error| compaction_phase("prepare compacted validation", error))?;
+        let actual = analyze_layers_with_modes(
+            std::slice::from_ref(&temp_upper),
+            Some(&temp_access.overrides),
+        )
+        .map_err(|error| compaction_phase("analyze compacted layer", error))?;
+        validate(&expected, &actual, layout)
+            .map_err(|error| compaction_phase("validate compacted layer", error))?;
+        temp_access
+            .restore()
+            .map_err(|error| compaction_phase("restore compacted modes", error))?;
+        source_access
+            .restore()
+            .map_err(|error| compaction_phase("restore source modes", error))?;
         test_crash("compaction-after-validate");
 
         let metadata = CompactionMetadata {
@@ -331,10 +389,12 @@ fn build_compacted_layer(
             source_layers: source_layers.to_vec(),
             base,
             entries: expected.entries.len(),
-            disk_bytes: allocated_bytes(&temp_upper)?,
+            disk_bytes: allocated_bytes(&temp_upper)
+                .map_err(|error| compaction_phase("measure compacted layer", error))?,
             created_at_unix_ms: now_unix_ms(),
         };
-        write_metadata(&temp_root, &metadata)?;
+        write_metadata(&temp_root, &metadata)
+            .map_err(|error| compaction_phase("write compacted metadata", error))?;
 
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
@@ -343,7 +403,8 @@ fn build_compacted_layer(
             remove_temporary_tree(&temp_root)?;
             return read_compaction_metadata(&target);
         }
-        fs::rename(&temp_root, &target)?;
+        fs::rename(&temp_root, &target)
+            .map_err(|error| compaction_phase("publish compacted layer", error.into()))?;
         sync_directory(target.parent().unwrap_or(&target));
         test_crash("compaction-after-publish");
         Ok(metadata)
@@ -359,13 +420,22 @@ fn build_compacted_layer(
             covered_logical: metadata.source_layers.len(),
         }),
         Err(error) => {
+            let _ = source_access.restore();
             let _ = remove_temporary_tree(&temp_root);
             Err(error)
         }
     }
 }
 
+#[cfg(test)]
 fn analyze_layers(directories: &[PathBuf]) -> Result<EffectiveState> {
+    analyze_layers_with_modes(directories, None)
+}
+
+fn analyze_layers_with_modes(
+    directories: &[PathBuf],
+    mode_overrides: Option<&HashMap<PathBuf, u32>>,
+) -> Result<EffectiveState> {
     let mut state = EffectiveState::default();
     for directory in directories {
         let mut items = Vec::new();
@@ -412,13 +482,23 @@ fn analyze_layers(directories: &[PathBuf]) -> Result<EffectiveState> {
                     state.opaques.insert(item.rel_path.clone());
                     state.entries.insert(
                         item.rel_path,
-                        EffectiveEntry::from_metadata(&item.source_path, &item.metadata)?,
+                        EffectiveEntry::from_metadata(
+                            &item.source_path,
+                            &item.metadata,
+                            mode_overrides
+                                .and_then(|overrides| overrides.get(&item.source_path).copied()),
+                        )?,
                     );
                 }
                 UpperEntryKind::Entry => {
                     let was_deleted = state.deletions.remove(&item.rel_path);
                     clear_ancestor_conflicts(&mut state, &item.rel_path);
-                    let entry = EffectiveEntry::from_metadata(&item.source_path, &item.metadata)?;
+                    let entry = EffectiveEntry::from_metadata(
+                        &item.source_path,
+                        &item.metadata,
+                        mode_overrides
+                            .and_then(|overrides| overrides.get(&item.source_path).copied()),
+                    )?;
                     let previous_kind = state.entries.get(&item.rel_path).map(|entry| entry.kind);
                     let merge_directory_children = entry.kind == EntryKind::Directory
                         && !was_deleted
@@ -439,6 +519,204 @@ fn analyze_layers(directories: &[PathBuf]) -> Result<EffectiveState> {
     }
     validate_state_shape(&state)?;
     Ok(state)
+}
+
+fn prepare_access(
+    layout: &SessionLayout,
+    roots: &[PathBuf],
+    journal_path: Option<&Path>,
+) -> Result<AccessRecords> {
+    let mut access = AccessRecords {
+        session_dir: layout.session_dir.clone(),
+        journal: journal_path.map(Path::to_path_buf),
+        records: Vec::new(),
+        overrides: HashMap::new(),
+        restored: false,
+    };
+    let mut journal = if let Some(path) = journal_path {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(path)?;
+        file.sync_all()?;
+        Some(OpenOptions::new().append(true).open(path)?)
+    } else {
+        None
+    };
+    let mut file_records = Vec::new();
+    let result = (|| -> Result<()> {
+        for root in roots {
+            scan_source_access(
+                layout,
+                root,
+                &mut access,
+                journal.as_mut(),
+                &mut file_records,
+            )?;
+        }
+        if let Some(journal) = journal.as_mut() {
+            for record in &file_records {
+                write_permission_record(journal, record)?;
+            }
+            journal.flush()?;
+            journal.sync_all()?;
+        }
+        for record in file_records {
+            let path = resolve_permission_path(&layout.session_dir, &record.path)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(record.mode | 0o400))?;
+            access.overrides.insert(path, record.mode);
+            access.records.push(record);
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = access.restore();
+        return Err(error);
+    }
+    Ok(access)
+}
+
+fn scan_source_access(
+    layout: &SessionLayout,
+    path: &Path,
+    access: &mut AccessRecords,
+    mut journal: Option<&mut fs::File>,
+    file_records: &mut Vec<PermissionRecord>,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    let mode = metadata.mode() & 0o7777;
+    if metadata.is_dir() {
+        if mode & 0o500 != 0o500 {
+            let record = permission_record(layout, path, mode)?;
+            if let Some(journal) = journal.as_deref_mut() {
+                write_permission_record(journal, &record)?;
+                journal.flush()?;
+                journal.sync_data()?;
+            }
+            fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o500))?;
+            access.overrides.insert(path.to_path_buf(), mode);
+            access.records.push(record);
+        }
+        for entry in fs::read_dir(path)? {
+            scan_source_access(
+                layout,
+                &entry?.path(),
+                access,
+                journal.as_deref_mut(),
+                file_records,
+            )?;
+        }
+    } else if metadata.is_file() && mode & 0o400 == 0 {
+        file_records.push(permission_record(layout, path, mode)?);
+    }
+    Ok(())
+}
+
+fn permission_record(layout: &SessionLayout, path: &Path, mode: u32) -> Result<PermissionRecord> {
+    let relative =
+        path.strip_prefix(&layout.session_dir)
+            .map_err(|_| CoreError::StateCorrupted {
+                step: 0,
+                reason: format!(
+                    "permission adjustment escaped the session: {}",
+                    path.display()
+                ),
+            })?;
+    validate_permission_relative(relative)?;
+    Ok(PermissionRecord {
+        path: relative.to_path_buf(),
+        mode,
+    })
+}
+
+fn write_permission_record(file: &mut fs::File, record: &PermissionRecord) -> Result<()> {
+    serde_json::to_writer(&mut *file, record)?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+fn restore_permission_records(session_dir: &Path, records: &[PermissionRecord]) -> Result<()> {
+    for record in records {
+        let path = resolve_permission_path(session_dir, &record.path)?;
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CoreError::StateCorrupted {
+                    step: 0,
+                    reason: format!(
+                        "permission journal referenced a symlink: {}",
+                        path.display()
+                    ),
+                });
+            }
+            Ok(_) => {
+                fs::set_permissions(&path, fs::Permissions::from_mode(record.mode))?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn restore_permission_journal(session_dir: &Path, temporary_root: &Path) -> Result<()> {
+    let journal_path = temporary_root.join(PERMISSION_JOURNAL);
+    if !journal_path.exists() {
+        return Ok(());
+    }
+    let file = fs::File::open(&journal_path)?;
+    let mut records = Vec::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        records.push(
+            serde_json::from_str::<PermissionRecord>(&line).map_err(|error| {
+                CoreError::StateCorrupted {
+                    step: 0,
+                    reason: format!(
+                        "invalid permission journal {}: {error}",
+                        journal_path.display()
+                    ),
+                }
+            })?,
+        );
+    }
+    restore_permission_records(session_dir, &records)?;
+    fs::remove_file(&journal_path)?;
+    Ok(())
+}
+
+fn resolve_permission_path(session_dir: &Path, relative: &Path) -> Result<PathBuf> {
+    validate_permission_relative(relative)?;
+    Ok(session_dir.join(relative))
+}
+
+fn validate_permission_relative(relative: &Path) -> Result<()> {
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || !(relative.starts_with("steps")
+            || relative.starts_with("layers/compacted")
+            || relative.starts_with("layers/tmp"))
+    {
+        return Err(CoreError::StateCorrupted {
+            step: 0,
+            reason: format!(
+                "permission journal path is outside session layers: {}",
+                relative.display()
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn remove_subtree(state: &mut EffectiveState, rel_path: &Path) {
@@ -531,7 +809,11 @@ fn validate_state_shape(state: &EffectiveState) -> Result<()> {
 }
 
 impl EffectiveEntry {
-    fn from_metadata(source_path: &Path, metadata: &fs::Metadata) -> Result<Self> {
+    fn from_metadata(
+        source_path: &Path,
+        metadata: &fs::Metadata,
+        mode_override: Option<u32>,
+    ) -> Result<Self> {
         let kind = manifest::entry_kind(metadata);
         if kind == EntryKind::Other {
             return Err(CoreError::CowUnsupported {
@@ -551,7 +833,7 @@ impl EffectiveEntry {
         };
         Ok(Self {
             kind,
-            mode: metadata.mode() & 0o7777,
+            mode: mode_override.unwrap_or(metadata.mode() & 0o7777),
             size: metadata.len(),
             symlink_target,
             xattr_digest,
@@ -571,7 +853,7 @@ fn materialize(state: &EffectiveState, upper: &Path, layout: &SessionLayout) -> 
         if entry.kind == EntryKind::Directory {
             directories.insert(
                 path.clone(),
-                DirectorySource::Layer(entry.source_path.clone()),
+                DirectorySource::Layer(entry.source_path.clone(), entry.mode),
             );
         }
     }
@@ -619,7 +901,6 @@ fn materialize(state: &EffectiveState, upper: &Path, layout: &SessionLayout) -> 
                     fs::copy(&entry.source_path, &target)?;
                     fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
                     crate::xattr::copy(&entry.source_path, &target)?;
-                    fs::set_permissions(&target, fs::Permissions::from_mode(entry.mode))?;
                     set_file_mtime(
                         &target,
                         FileTime::from_unix_time(
@@ -627,6 +908,7 @@ fn materialize(state: &EffectiveState, upper: &Path, layout: &SessionLayout) -> 
                             entry.mtime_ns.rem_euclid(1_000_000_000) as u32,
                         ),
                     )?;
+                    fs::set_permissions(&target, fs::Permissions::from_mode(entry.mode))?;
                     if entry.nlink.unwrap_or(1) > 1 {
                         hardlinks.insert(key, target);
                     }
@@ -725,7 +1007,7 @@ fn finalize_directory_metadata(
     opaque: bool,
 ) -> Result<()> {
     let source_path = match source {
-        Some(DirectorySource::Layer(path) | DirectorySource::Base(path)) => Some(path),
+        Some(DirectorySource::Layer(path, _) | DirectorySource::Base(path)) => Some(path),
         Some(DirectorySource::Generated) | None => None,
     };
     let metadata = source_path.and_then(|path| fs::symlink_metadata(path).ok());
@@ -735,11 +1017,14 @@ fn finalize_directory_metadata(
     if opaque {
         set_xattr(target, OPAQUE_XATTR, b"y")?;
     }
-    let mode = metadata
-        .as_ref()
-        .map(|metadata| metadata.mode() & 0o7777)
-        .unwrap_or(0o755);
-    fs::set_permissions(target, fs::Permissions::from_mode(mode))?;
+    let mode = match source {
+        Some(DirectorySource::Layer(_, mode)) => *mode,
+        Some(DirectorySource::Base(_)) => metadata
+            .as_ref()
+            .map(|metadata| metadata.mode() & 0o7777)
+            .unwrap_or(0o755),
+        Some(DirectorySource::Generated) | None => 0o755,
+    };
     if let Some(metadata) = metadata {
         let mtime = manifest::mtime_ns(&metadata);
         let _ = set_file_mtime(
@@ -750,6 +1035,7 @@ fn finalize_directory_metadata(
             ),
         );
     }
+    fs::set_permissions(target, fs::Permissions::from_mode(mode))?;
     Ok(())
 }
 
@@ -955,6 +1241,7 @@ fn cleanup_stale_temporary_directories(layout: &SessionLayout) -> Result<()> {
     };
     for entry in entries {
         let entry = entry?;
+        restore_permission_journal(&layout.session_dir, &entry.path())?;
         remove_temporary_tree(&entry.path())?;
     }
     Ok(())
@@ -1077,6 +1364,10 @@ fn now_unix_ms() -> u64 {
 
 fn validation_error(message: String) -> CoreError {
     CoreError::IsolationFailed(format!("compacted layer validation failed: {message}"))
+}
+
+fn compaction_phase(phase: &str, error: CoreError) -> CoreError {
+    CoreError::Io(std::io::Error::other(format!("{phase}: {error}")))
 }
 
 fn test_crash(point: &str) {
@@ -1422,5 +1713,86 @@ mod tests {
                 .file_type()
                 .is_char_device()
         );
+    }
+
+    #[test]
+    fn compaction_preserves_unreadable_files() {
+        let (_root, layout) = fixture();
+        manifest::capture_base_manifest(&layout.workspace, &layout.base_manifest_path())
+            .expect("base manifest");
+        let first = layout.upper_dir(1);
+        write(&first.join("locked.txt"), "locked contents\n");
+        set_user_xattr(&first.join("locked.txt"), "user.cowbox.locked", b"kept");
+        fs::set_permissions(first.join("locked.txt"), fs::Permissions::from_mode(0o000))
+            .expect("locked file");
+        let physical = vec![MountLayer {
+            upper_dir: first,
+            alias: "l1".to_string(),
+            covered_logical: 1,
+        }];
+
+        let compacted =
+            build_compacted_layer(&layout, 2, &[1], &physical).expect("compacted layer");
+        assert_eq!(
+            fs::metadata(physical[0].upper_dir.join("locked.txt"))
+                .expect("source metadata")
+                .mode()
+                & 0o777,
+            0
+        );
+        assert!(
+            !compacted
+                .upper_dir
+                .parent()
+                .expect("compacted root")
+                .join(PERMISSION_JOURNAL)
+                .exists()
+        );
+        let target = compacted.upper_dir.join("locked.txt");
+        assert_eq!(
+            fs::metadata(&target).expect("locked metadata").mode() & 0o777,
+            0
+        );
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o400))
+            .expect("temporary read permission");
+        assert_eq!(
+            fs::read_to_string(&target).expect("locked contents"),
+            "locked contents\n"
+        );
+        assert_eq!(user_xattr(&target, "user.cowbox.locked"), b"kept");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o000))
+            .expect("restore locked mode");
+    }
+
+    #[test]
+    fn permission_journal_restores_after_an_interrupted_read() {
+        let (_root, layout) = fixture();
+        let first = layout.upper_dir(1);
+        write(&first.join("locked.txt"), "locked\n");
+        fs::set_permissions(first.join("locked.txt"), fs::Permissions::from_mode(0o000))
+            .expect("locked file");
+        let temp = layout.session_dir.join("layers/tmp/interrupted");
+        let journal = temp.join(PERMISSION_JOURNAL);
+
+        let access = prepare_access(&layout, std::slice::from_ref(&first), Some(&journal))
+            .expect("prepare access");
+        assert_eq!(
+            fs::metadata(first.join("locked.txt"))
+                .expect("elevated")
+                .mode()
+                & 0o777,
+            0o400
+        );
+        std::mem::forget(access);
+
+        restore_permission_journal(&layout.session_dir, &temp).expect("restore journal");
+        assert_eq!(
+            fs::metadata(first.join("locked.txt"))
+                .expect("restored")
+                .mode()
+                & 0o777,
+            0
+        );
+        assert!(!journal.exists());
     }
 }

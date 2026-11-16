@@ -49,6 +49,11 @@ All notable changes to this project are documented here. The format follows
 - The benchmark harness rejects unexpected candidate `CONFIG_ERROR` exits;
   only an explicit `--allow-legacy-layer-limit` accepts the pre-compaction
   release binary stopping after step 151.
+- Compaction temporarily records and elevates source-layer read permissions for
+  `000` files and directories, then restores the original modes after validation
+  or from a durable journal after interruption.
+- The adversarial long-session view check now runs with `set -e`, so every file,
+  mode, xattr, symlink, and hardlink assertion can fail CI independently.
 
 ## [0.4.0-m2] - 2026-11-16
 
