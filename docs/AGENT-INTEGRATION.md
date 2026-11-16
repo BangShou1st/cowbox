@@ -91,6 +91,11 @@ rollback/commit commands. A visible text block repeats the snapshot summary.
 Failures after step creation retain that metadata, so an agent can explicitly
 call `cowbox_rollback`.
 
+Control commands are invoked with an explicit `--session` bound to the proxy.
+The CLI checks that session against the active pointer under the session lock
+before changing any state. An explicit `--network host` is forwarded as a CLI
+override, so it cannot be replaced by a project-level `network = "off"`.
+
 ### Harness configuration
 
 Example `.mcp.json` for a Linux harness:

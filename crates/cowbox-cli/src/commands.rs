@@ -218,7 +218,7 @@ fn command_diff(args: &DiffArgs) -> CliResult<i32> {
     }
     let ctx = setup()?;
     let _lock = ctx.store.lock()?;
-    let record = active_record(&ctx)?;
+    let record = active_record_for(&ctx, args.session.as_deref())?;
     let target = args.step.unwrap_or(record.dag.head_step);
     if !record.dag.nodes.contains_key(&target) {
         return Err(CliError::new(
@@ -280,7 +280,7 @@ fn command_log(args: &LogArgs) -> CliResult<i32> {
 fn command_rollback(args: &RollbackArgs) -> CliResult<i32> {
     let ctx = setup()?;
     let _lock = ctx.store.lock()?;
-    let mut record = active_record(&ctx)?;
+    let mut record = active_record_for(&ctx, args.session.as_deref())?;
     ensure_no_pending_commit(&ctx, &record)?;
     let previous = record.dag.head_step;
     record.dag.rollback(args.step)?;
@@ -338,7 +338,7 @@ fn command_commit(args: &CommitArgs) -> CliResult<i32> {
     if args.recover {
         return command_commit_recover(&ctx, args);
     }
-    let mut record = active_record(&ctx)?;
+    let mut record = active_record_for(&ctx, args.session.as_deref())?;
     ensure_no_pending_commit(&ctx, &record)?;
     let target = args.step.unwrap_or(record.dag.head_step);
     if !record.dag.nodes.contains_key(&target) {
@@ -1607,6 +1607,24 @@ fn active_record(ctx: &Context) -> CliResult<SessionRecord> {
         .hint("run `cowbox run -- <cmd>` first")
         .exit(1)
     })
+}
+
+fn active_record_for(ctx: &Context, requested: Option<&str>) -> CliResult<SessionRecord> {
+    let record = active_record(ctx)?;
+    if let Some(requested) = requested {
+        if requested != record.session_id {
+            return Err(CliError::new(
+                "SESSION_NOT_ACTIVE",
+                format!(
+                    "session {requested} is not the active session for this workspace; active session is {}",
+                    record.session_id
+                ),
+            )
+            .hint("bind the intended session or start it before retrying")
+            .exit(2));
+        }
+    }
+    Ok(record)
 }
 
 fn target_chain(record: &SessionRecord, target: u64) -> CliResult<Vec<u64>> {

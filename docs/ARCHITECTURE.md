@@ -425,6 +425,13 @@ protocol errors are converted into bounded JSON-RPC errors or `isError` tool
 results. If a step was already recorded, the metadata still identifies it so
 the agent can call `cowbox_rollback`.
 
+Control commands receive the proxy's bound session explicitly. The CLI verifies
+that this session is still the workspace's active pointer while holding the
+session lock, so a concurrent pointer change cannot redirect a diff, rollback,
+or commit dry-run into another session. Explicit network policy is also
+forwarded as a CLI override; a project-level `off` cannot replace an explicit
+`--network host`.
+
 The adapter maps absolute upstream command arguments that start with the
 workspace root into the merged overlay mount. This allows file-based MCP server
 scripts under the workspace without granting read access to the live host path.

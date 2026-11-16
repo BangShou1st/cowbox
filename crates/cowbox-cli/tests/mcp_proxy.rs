@@ -36,6 +36,10 @@ impl Fixture {
     }
 
     fn client(&self, extra: &[&str], server_args: &[&str]) -> Client {
+        self.client_network("off", extra, server_args)
+    }
+
+    fn client_network(&self, network: &str, extra: &[&str], server_args: &[&str]) -> Client {
         let binary = assert_cmd::cargo::cargo_bin("cowbox");
         let mut command = std::process::Command::new(binary);
         command
@@ -45,7 +49,7 @@ impl Fixture {
             .arg("--workspace")
             .arg(&self.workspace)
             .arg("--network")
-            .arg("off")
+            .arg(network)
             .args(extra)
             .arg("--")
             .arg("python3")
@@ -391,4 +395,102 @@ fn reserved_tool_conflicts_fail_discovery() {
     client.initialize();
     let tools = client.request("tools/list", json!({}));
     assert_eq!(tools["error"]["data"]["code"], "MCP_TOOL_NAME_CONFLICT");
+}
+
+#[test]
+fn explicit_host_network_overrides_project_off() {
+    if !require_sandbox() {
+        return;
+    }
+    let fixture = Fixture::new();
+    std::fs::write(
+        fixture.workspace.join(".cowbox.toml"),
+        "version = 1\n\n[sandbox]\nnetwork = \"off\"\n",
+    )
+    .expect("project config");
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("listener");
+    let port = listener.local_addr().expect("listener address").port();
+    let mut client = fixture.client_network("host", &[], &[]);
+    client.initialize();
+    let result = client.call_tool("connect_tcp", json!({ "host": "127.0.0.1", "port": port }));
+    assert_eq!(
+        result["isError"], false,
+        "explicit host policy did not reach the sandbox: {result}"
+    );
+    assert!(content_text(&result).contains("connected"));
+
+    let output = Command::cargo_bin("cowbox")
+        .expect("binary")
+        .current_dir(&fixture.workspace)
+        .env("COWBOX_HOME", &fixture.state)
+        .args(["stats", "--json"])
+        .output()
+        .expect("stats");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stats: Value = serde_json::from_slice(&output.stdout).expect("stats JSON");
+    assert_eq!(stats["data"]["policy"]["network"], "host");
+    assert_eq!(stats["data"]["policy"]["network_source"], "cli");
+    drop(listener);
+}
+
+#[test]
+fn session_selector_refuses_to_touch_another_active_session() {
+    if !require_sandbox() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let first = run_step(&fixture, 1);
+    let second = run_step(&fixture, 2);
+    assert_eq!(first["session"]["id"], second["session"]["id"]);
+    let stale_session = first["session"]["id"]
+        .as_str()
+        .expect("first session")
+        .to_string();
+
+    let discarded = run_command(&fixture, &["discard", "--yes", "--json"]);
+    assert!(discarded["ok"].as_bool() == Some(true), "{discarded}");
+    let current = run_step(&fixture, 1);
+    let current_session = current["session"]["id"]
+        .as_str()
+        .expect("current session")
+        .to_string();
+    assert_ne!(current_session, stale_session);
+
+    let rejected = run_command(
+        &fixture,
+        &["rollback", "0", "--session", &stale_session, "--json"],
+    );
+    assert_eq!(rejected["ok"].as_bool(), Some(false), "{rejected}");
+    assert_eq!(rejected["error"]["code"], "SESSION_NOT_ACTIVE");
+    assert_eq!(rejected["error"]["exit_code"].as_i64(), Some(2));
+
+    let log = run_command(&fixture, &["log", "--json"]);
+    assert_eq!(log["session"]["id"], current_session);
+    assert_eq!(log["session"]["head"].as_u64(), Some(1));
+    let cleaned = run_command(&fixture, &["discard", "--yes", "--purge", "--json"]);
+    assert_eq!(cleaned["ok"].as_bool(), Some(true), "{cleaned}");
+}
+
+fn run_step(fixture: &Fixture, count: usize) -> Value {
+    let mut value = Value::Null;
+    for _ in 0..count {
+        value = run_command(fixture, &["run", "--json", "--", "true"]);
+        assert_eq!(value["ok"].as_bool(), Some(true), "{value}");
+    }
+    value
+}
+
+fn run_command(fixture: &Fixture, args: &[&str]) -> Value {
+    let output = Command::cargo_bin("cowbox")
+        .expect("binary")
+        .current_dir(&fixture.workspace)
+        .env("COWBOX_HOME", &fixture.state)
+        .args(args)
+        .output()
+        .expect("run cowbox");
+    serde_json::from_slice(&output.stdout).expect("cowbox JSON")
 }

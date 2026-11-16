@@ -314,6 +314,10 @@ Three reserved control tools are always present:
 `cowbox commit --step <n>` in a terminal in the same workspace and completes the
 normal interactive confirmation.
 
+Control commands are bound to the proxy's session: the CLI rejects a selected
+session if it is no longer the workspace's active pointer. An explicit
+`--network host` also overrides a project-level `network = "off"`.
+
 The first MCP version supports stdio tool servers only. Cross-call state lives
 in the workspace, not in a long-lived upstream process. HTTP/SSE upstreams,
 resources, prompts, and persistent MCP subprocesses are not implemented.

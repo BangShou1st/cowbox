@@ -104,6 +104,8 @@ pub struct RunArgs {
 
 #[derive(Debug, Args)]
 pub struct DiffArgs {
+    #[arg(long)]
+    pub session: Option<String>,
     #[arg(long, default_value_t = 0)]
     pub base: u64,
     #[arg(long)]
@@ -128,6 +130,8 @@ pub struct LogArgs {
 pub struct RollbackArgs {
     pub step: u64,
     #[arg(long)]
+    pub session: Option<String>,
+    #[arg(long)]
     pub json: bool,
 }
 
@@ -141,6 +145,8 @@ pub struct UndoArgs {
 
 #[derive(Debug, Args)]
 pub struct CommitArgs {
+    #[arg(long, conflicts_with = "recover")]
+    pub session: Option<String>,
     #[arg(long)]
     pub step: Option<u64>,
     #[arg(long)]

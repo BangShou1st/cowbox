@@ -41,6 +41,16 @@ All notable changes to this project are documented here. The format follows
 - The cowbox skill documents MCP snapshot use, rollback-first recovery, and the
   terminal commit boundary.
 
+### Fixed
+
+- MCP control tools now pass the proxy's bound session to `diff`, `rollback`,
+  and `commit --dry-run`; the CLI rejects a selected session that is no longer
+  the active workspace session, so a pointer change cannot redirect a control
+  operation into another session.
+- An explicit `mcp-proxy --network host` is now forwarded to every sandbox
+  step, so a project `[sandbox] network = "off"` cannot override the caller's
+  explicit choice.
+
 ### Known limitations
 
 - MCP upstream transport is stdio only; HTTP/SSE, resources, prompts, and a

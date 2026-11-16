@@ -281,6 +281,10 @@ cowbox mcp-proxy --network off -- python3 /path/to/your/mcp-server.py
 `cowbox_commit` 永不写宿主机。人工检查后，由用户在同一 workspace 的终端执行
 `cowbox commit --step <n>` 并完成原有交互确认。
 
+控制命令会显式绑定代理的 session：如果它已不是该 workspace 的 active 指针，
+CLI 会拒绝操作，不会误改另一个 session。显式 `--network host` 也会覆盖项目里的
+`network = "off"`。
+
 首版 MCP 只支持 stdio 工具型上游；跨调用状态通过 workspace 文件保存，不维持长驻
 上游进程。HTTP/SSE、resources、prompts 和持久 MCP 子进程尚未实现。代理行为由
 `--timeout`、`--discovery-timeout`、`--max-response-bytes`、`--session`、

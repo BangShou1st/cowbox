@@ -39,6 +39,7 @@ struct Proxy {
     executable: PathBuf,
     upstream: Vec<String>,
     network: cowbox_core::NetworkMode,
+    network_explicit: bool,
     session: Option<String>,
     call_timeout: Option<Duration>,
     discovery_timeout: Option<Duration>,
@@ -135,6 +136,7 @@ impl Proxy {
             executable,
             upstream,
             network: network.mode,
+            network_explicit: args.network.is_some(),
             session: args.session.clone(),
             call_timeout,
             discovery_timeout,
@@ -608,29 +610,7 @@ impl Proxy {
             Err(error) => return self.tool_error_without_step(&error),
         };
         let step = arguments.get("step").and_then(Value::as_u64);
-        let mut args: Vec<OsString> = vec![OsString::from(name.trim_start_matches("cowbox_"))];
-        match name {
-            "cowbox_rollback" => {
-                args.push(OsString::from(step.unwrap_or(0).to_string()));
-                args.push(OsString::from("--json"));
-            }
-            "cowbox_diff" => {
-                args.push(OsString::from("--json"));
-                if let Some(step) = step {
-                    args.push(OsString::from("--step"));
-                    args.push(OsString::from(step.to_string()));
-                }
-            }
-            "cowbox_commit" => {
-                args.push(OsString::from("--dry-run"));
-                args.push(OsString::from("--json"));
-                if let Some(step) = step {
-                    args.push(OsString::from("--step"));
-                    args.push(OsString::from(step.to_string()));
-                }
-            }
-            _ => {}
-        }
+        let args = control_args(name, step, &before.id);
         let cli = match self.run_cli(&args) {
             Ok(cli) => cli,
             Err(error) => {
@@ -824,9 +804,9 @@ impl Proxy {
             OsString::from("--timeout"),
             OsString::from(format_timeout(sandbox_timeout)),
         ];
-        if self.network.isolates_network() {
+        if self.network_explicit || self.network.isolates_network() {
             args.push(OsString::from("--network"));
-            args.push(OsString::from("off"));
+            args.push(OsString::from(self.network.as_str()));
         }
         for path in &self.allow_read {
             args.push(OsString::from("--allow-read"));
@@ -1101,6 +1081,35 @@ fn validate_control_arguments(name: &str, arguments: &Value) -> Result<(), Strin
     Ok(())
 }
 
+fn control_args(name: &str, step: Option<u64>, session: &str) -> Vec<OsString> {
+    let mut args = vec![OsString::from(name.trim_start_matches("cowbox_"))];
+    match name {
+        "cowbox_rollback" => {
+            args.push(OsString::from(step.unwrap_or(0).to_string()));
+            args.push(OsString::from("--json"));
+        }
+        "cowbox_diff" => {
+            args.push(OsString::from("--json"));
+            if let Some(step) = step {
+                args.push(OsString::from("--step"));
+                args.push(OsString::from(step.to_string()));
+            }
+        }
+        "cowbox_commit" => {
+            args.push(OsString::from("--dry-run"));
+            args.push(OsString::from("--json"));
+            if let Some(step) = step {
+                args.push(OsString::from("--step"));
+                args.push(OsString::from(step.to_string()));
+            }
+        }
+        _ => {}
+    }
+    args.push(OsString::from("--session"));
+    args.push(OsString::from(session));
+    args
+}
+
 fn parse_adapter_output(
     stdout: Option<&str>,
     stdout_truncated: bool,
@@ -1354,5 +1363,17 @@ mod tests {
         assert!(validate_control_arguments("cowbox_diff", &json!({})).is_ok());
         assert!(validate_control_arguments("cowbox_rollback", &json!({})).is_err());
         assert!(validate_control_arguments("cowbox_diff", &json!({"command": "rm -rf"})).is_err());
+    }
+
+    #[test]
+    fn control_commands_always_bind_the_session() {
+        for name in ["cowbox_diff", "cowbox_rollback", "cowbox_commit"] {
+            let args = control_args(name, Some(3), "session-a");
+            let session_index = args
+                .iter()
+                .position(|arg| arg == "--session")
+                .expect("session flag");
+            assert_eq!(args[session_index + 1], "session-a");
+        }
     }
 }
