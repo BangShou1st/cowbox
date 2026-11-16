@@ -130,6 +130,28 @@ Useful bounds:
 - Repeatable `--allow-read <path>` exposes a specific upstream installation
   path without opening the rest of the host.
 
+### Reproducible harness acceptance
+
+The checked-in real-harness acceptance uses Claude Code with a temporary
+project MCP configuration and no permanent harness changes:
+
+```bash
+python3 scripts/acceptance_m3_agent.py \
+  --binary "$COWBOX_BIN" \
+  --json-output "$HOME/cowbox-bench-results/m3-claude-agent.json"
+```
+
+It disables Claude's native file tools, requires the MCP upstream tools plus
+the three cowbox control tools, writes a wrong file, inspects it, rolls back,
+rewrites the correct content, previews the commit, and then performs a real PTY
+confirmation with `cowbox commit --step <n>`. The report preserves the
+Claude JSONL stream beside the JSON output.
+
+For the Windows launcher's persistent stdio path, run
+`scripts/acceptance_m3_windows.py` with a Windows Python interpreter. It keeps
+one `cowbox.exe` MCP process open across multiple requests while the launcher
+forwards through `wsl.exe`.
+
 The first MCP version does not support HTTP/SSE upstreams, resources, prompts,
 notifications/list-changed subscription, or a persistent upstream process.
 Those are roadmap items, not partial behaviors hidden behind a capability

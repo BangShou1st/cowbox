@@ -88,8 +88,8 @@ Status: preview available in `0.6.0-m3`.
   `cowbox_commit`, including upstream name-conflict detection.
 - [x] Dry-run-only commit preview. The host write remains a terminal
   `cowbox commit --step <n>` with the existing human confirmation.
-- [ ] Linux/WSL2 fixture coverage and a real agent-harness workflow.
-- [ ] Persistent Windows launcher stdio forwarding through the real
+- [x] Linux/WSL2 fixture coverage and a real agent-harness workflow.
+- [x] Persistent Windows launcher stdio forwarding through the real
   `cowbox.exe -> wsl.exe -> Linux cowbox` path.
 - [x] `skills/cowbox` guidance that prefers rollback over stacking speculative
   fixes.

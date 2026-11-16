@@ -380,7 +380,7 @@ python3 scripts/offline_workflow.py \
   the command in a fresh Linux network namespace. The namespace is not a
   firewall, cannot filter selected destinations, and does not isolate
   filesystem-backed Unix sockets.
-- M2 is a guard against **accidental damage and agent mistakes**, not a
+- cowbox is a guard against **accidental damage and agent mistakes**, not a
   hardened sandbox for hostile code. Kernel exploits and deliberately malicious
   binaries are out of scope.
 - `cowbox commit` asks for confirmation in a terminal. Non-interactive callers
@@ -427,6 +427,14 @@ and 200,000-file first-run limits of 60/80 ms and 150/200 ms pass, as do the
 with 279 `host` and 21 `off` steps, automatic compaction at 151 and 268,
 rollback, branch, commit, and interruption recovery. Network namespace setup
 added 0.47 ms to the 10k first-run median and 0.38 ms to the one-parent median.
+
+The `v0.6.0-m3` candidate repeated the gates against the published
+`v0.5.0-m2` Linux release with 20 samples and one warm-up. First-run
+median / P95 was 33.70 / 40.41 ms at 10k files and 120.55 / 142.02 ms at
+200k files. Candidate 10-file diff median / P95 was 7.17 / 14.54 ms at 10k
+and 88.60 / 97.21 ms at 200k. The MCP first handshake was 83.855 / 107.503 ms
+median / P95; continuous same-session tool calls were 103.028 / 164.157 ms,
+including a fresh sandbox step and upstream process handshake per call.
 
 See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for full statistics, fixtures,
 machine details, caveats, and the exact rerun command. P99 is not separately
