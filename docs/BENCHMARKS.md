@@ -1097,6 +1097,25 @@ and `run_true` reported no statistically significant change (`p=0.12`).
 Raw files are under
 `/home/bangshou/cowbox-bench-results/m2-commit-recovery-20261116/`.
 
+### Commit rollback content verification
+
+Criterion rerun on WSL2/ext4 with 10,000 files. `run_true` used the release
+binary with SHA-256
+`e991767788c3c0ca73ef390f8758ded544345491086dda3e352156eabe927796`.
+
+| Benchmark | Lower / estimate / upper |
+| --- | --- |
+| `diff_scan/10000_files_10_changes` | 3.9625 / **3.9828** / 4.0034 ms |
+| `rollback_dag/100_steps` | 10.612 / **10.704** / 10.829 ns |
+| `run_true/10000_files_end_to_end` | 23.430 / **23.733** / 24.041 ms |
+
+The workspace suite passed 122 tests. The forced-sandbox suite passed 37 tests
+and verified that rollback preserves an unreadable file edited on the host and a
+user file whose name resembles a commit temporary file. The 300-step CLI
+acceptance passed with compaction at steps 151 and 268 and 16 diff entries.
+The acceptance JSON and Criterion log are in
+`/home/bangshou/cowbox-bench-results/m2-recovery-verify-1Oz2Nh/`.
+
 ## How to run
 
 ```bash

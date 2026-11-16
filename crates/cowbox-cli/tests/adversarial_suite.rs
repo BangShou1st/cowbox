@@ -826,32 +826,34 @@ fn commit_recovery_preserves_user_content_inside_an_interrupted_directory() {
     assert_sigkill(&crashed);
     let journal = only_commit_journal(&env, session_id);
 
-    let user_file = swap.join("user.txt");
-    fs::write(&user_file, "user data\n").expect("user content after interruption");
-    let (code, refused) = env.json(&["commit", "--recover", "--yes", "--json"]);
-    assert_ne!(
-        code, 0,
-        "recovery accepted unexpected user content: {refused}"
-    );
-    assert_eq!(
-        refused["error"]["code"].as_str(),
-        Some("COMMIT_FAILED"),
-        "unexpected refusal: {refused}"
-    );
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("host content changed inside")),
-        "refusal did not explain the directory drift: {refused}"
-    );
-    assert_eq!(
-        fs::read_to_string(&user_file).expect("preserved user content"),
-        "user data\n"
-    );
-    assert_eq!(journal_phase(&journal), "applying");
-    assert!(journal.join("backup").is_dir());
+    for name in ["user.txt", ".autosave.cowbox-cache.tmp"] {
+        let user_file = swap.join(name);
+        fs::write(&user_file, "user data\n").expect("user content after interruption");
+        let (code, refused) = env.json(&["commit", "--recover", "--yes", "--json"]);
+        assert_ne!(
+            code, 0,
+            "recovery accepted unexpected user content: {refused}"
+        );
+        assert_eq!(
+            refused["error"]["code"].as_str(),
+            Some("COMMIT_FAILED"),
+            "unexpected refusal: {refused}"
+        );
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(name)),
+            "refusal did not identify the changed entry: {refused}"
+        );
+        assert_eq!(
+            fs::read_to_string(&user_file).expect("preserved user content"),
+            "user data\n"
+        );
+        assert_eq!(journal_phase(&journal), "applying");
+        assert!(journal.join("backup").is_dir());
+        fs::remove_file(&user_file).expect("remove user content before retry");
+    }
 
-    fs::remove_file(&user_file).expect("remove user content before retry");
     let (code, recovered) = env.json(&["commit", "--recover", "--yes", "--json"]);
     assert_eq!(code, 0, "retry after resolving drift failed: {recovered}");
     assert_eq!(recovered["data"]["action"].as_str(), Some("restore_host"));
@@ -861,6 +863,78 @@ fn commit_recovery_preserves_user_content_inside_an_interrupted_directory() {
     );
     assert!(!swap.join("child.txt").exists());
     assert_eq!(journal_phase(&journal), "rolled_back");
+}
+
+#[test]
+fn commit_recovery_preserves_same_size_edit_to_write_only_file() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    let draft = env.workspace.path().join("draft");
+    let backup_target = env.workspace.path().join("z-backup");
+    fs::write(&backup_target, "before\n").expect("base file");
+    env.init();
+    let (code, run) = run_script(
+        &env,
+        "set -e\nprintf original > draft\nchmod 0200 draft\nprintf changed > z-backup",
+    );
+    assert_eq!(code, 0, "write-only fixture run failed: {run}");
+    let session_id = run["session"]["id"].as_str().expect("session id");
+    let crashed = crash_cowbox(
+        &env,
+        &["commit", "--yes", "--json"],
+        "commit-after-first-write",
+    );
+    assert_sigkill(&crashed);
+    let journal = only_commit_journal(&env, session_id);
+
+    if !rustix::process::geteuid().is_root() {
+        assert_eq!(
+            fs::read(&draft)
+                .expect_err("draft should be unreadable")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+    fs::write(&draft, "my edits").expect("same-size host edit after interruption");
+    let (code, refused) = env.json(&["commit", "--recover", "--yes", "--json"]);
+    assert_ne!(code, 0, "recovery accepted an edit to draft: {refused}");
+    assert_eq!(refused["error"]["code"].as_str(), Some("COMMIT_FAILED"));
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("draft")),
+        "refusal did not identify the changed entry: {refused}"
+    );
+    assert_eq!(journal_phase(&journal), "applying");
+    assert_eq!(
+        fs::read_to_string(journal.join("backup/z-backup")).expect("preserved backup"),
+        "before\n"
+    );
+    assert_eq!(
+        fs::symlink_metadata(&draft).expect("draft").mode() & 0o777,
+        0o200
+    );
+    fs::set_permissions(&draft, fs::Permissions::from_mode(0o600)).expect("read preserved draft");
+    assert_eq!(
+        fs::read_to_string(&draft).expect("preserved edit"),
+        "my edits"
+    );
+
+    fs::rename(&draft, env.state.path().join("saved-draft"))
+        .expect("save the edit outside the workspace");
+    let (code, recovered) = env.json(&["commit", "--recover", "--yes", "--json"]);
+    assert_eq!(
+        code, 0,
+        "retry after preserving the host edit failed: {recovered}"
+    );
+    assert_eq!(recovered["data"]["action"].as_str(), Some("restore_host"));
+    assert_eq!(journal_phase(&journal), "rolled_back");
+    assert_eq!(
+        fs::read_to_string(env.state.path().join("saved-draft")).expect("saved host edit"),
+        "my edits"
+    );
 }
 
 #[test]

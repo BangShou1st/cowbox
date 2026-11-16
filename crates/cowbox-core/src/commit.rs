@@ -1504,18 +1504,19 @@ fn ensure_host_state(layout: &SessionLayout, ops: &[CommitOp], expected: HostSta
             .ancestors()
             .skip(1)
             .find(|ancestor| post_restricted.contains(*ancestor));
-        if restricted_ancestor.is_some_and(|ancestor| post_confirmed.contains(ancestor)) {
-            // The parent directory is confirmed to be the post-state directory
-            // without owner execute permission. An unprivileged host reader
-            // cannot observe or change descendants without first changing and
-            // restoring that parent mode, so the recorded post-state stands.
+        if expected == HostState::PostOnly
+            && restricted_ancestor.is_some_and(|ancestor| post_confirmed.contains(ancestor))
+        {
+            // Finalization leaves the host tree in place. Rollback must verify
+            // descendants before it can delete or replace the directory.
             continue;
         }
         let host_path = layout.workspace.join(&op.rel_path);
         let current = match fingerprint(&host_path) {
             Ok(current) => current,
             Err(CoreError::Io(error))
-                if error.kind() == std::io::ErrorKind::PermissionDenied
+                if expected == HostState::PostOnly
+                    && error.kind() == std::io::ErrorKind::PermissionDenied
                     && post_requires_metadata_only(&op.post) =>
             {
                 match fingerprint_metadata_matches(&host_path, &op.post) {
@@ -1538,6 +1539,15 @@ fn ensure_host_state(layout: &SessionLayout, ops: &[CommitOp], expected: HostSta
                     }
                     Err(error) => return Err(error),
                 }
+            }
+            Err(CoreError::Io(error))
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && expected == HostState::PreOrPost =>
+            {
+                return Err(CoreError::CommitFailed(format!(
+                    "refusing commit recovery: could not verify host path {}: {error}; backups were preserved",
+                    op.rel_path.display()
+                )));
             }
             Err(CoreError::Io(error))
                 if error.kind() == std::io::ErrorKind::PermissionDenied
@@ -1634,36 +1644,33 @@ fn ensure_host_subtrees(layout: &SessionLayout, ops: &[CommitOp]) -> Result<()> 
     let mut conflicts = BTreeSet::new();
     for root in roots {
         let host_root = layout.workspace.join(&root);
-        let Ok(metadata) = fs::symlink_metadata(&host_root) else {
-            continue;
+        let metadata = match fs::symlink_metadata(&host_root) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(commit_context("verify host directory", &host_root, error)),
         };
-        if !metadata.is_dir()
-            || metadata.file_type().is_symlink()
-            || metadata.mode() & 0o500 != 0o500
-        {
+        if !metadata.is_dir() {
             continue;
         }
         let mut seen = BTreeSet::new();
-        let mut blocked = BTreeSet::new();
         walk_expected_subtree(
             &host_root,
-            &root,
             &layout.workspace,
             &base,
             &op_paths,
             &allowed_ancestors,
             &mut seen,
-            &mut blocked,
             &mut conflicts,
         )?;
         for path in base.keys() {
-            if path.starts_with(&root)
-                && !op_paths.contains(path)
-                && !seen.contains(path)
-                && !blocked
-                    .iter()
-                    .any(|directory| path.starts_with(directory) && path != directory)
-            {
+            if path.starts_with(&root) && !op_paths.contains(path) && !seen.contains(path) {
                 conflicts.insert(path.clone());
             }
         }
@@ -1682,32 +1689,21 @@ fn ensure_host_subtrees(layout: &SessionLayout, ops: &[CommitOp]) -> Result<()> 
     )))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn walk_expected_subtree(
     directory: &Path,
-    relative: &Path,
     workspace: &Path,
     base: &BTreeMap<PathBuf, ManifestEntry>,
     op_paths: &BTreeSet<PathBuf>,
     allowed_ancestors: &BTreeSet<PathBuf>,
     seen: &mut BTreeSet<PathBuf>,
-    blocked: &mut BTreeSet<PathBuf>,
     conflicts: &mut BTreeSet<PathBuf>,
 ) -> Result<()> {
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            blocked.insert(relative.to_path_buf());
-            return Ok(());
-        }
-        Err(error) => return Err(error.into()),
-    };
+    let entries = fs::read_dir(directory).map_err(|error| {
+        commit_context("verify host directory before rollback", directory, error)
+    })?;
     let mut entries = entries.collect::<std::io::Result<Vec<_>>>()?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
-        if is_commit_temp_name(&entry.file_name()) {
-            continue;
-        }
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path)?;
         let rel_path = path
@@ -1736,24 +1732,16 @@ fn walk_expected_subtree(
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
             walk_expected_subtree(
                 &path,
-                &rel_path,
                 workspace,
                 base,
                 op_paths,
                 allowed_ancestors,
                 seen,
-                blocked,
                 conflicts,
             )?;
         }
     }
     Ok(())
-}
-
-fn is_commit_temp_name(name: &std::ffi::OsStr) -> bool {
-    name.to_str().is_some_and(|name| {
-        name.starts_with('.') && name.ends_with(".tmp") && name.contains(".cowbox-")
-    })
 }
 
 fn post_requires_metadata_only(fingerprint: &Fingerprint) -> bool {

@@ -324,11 +324,10 @@ or storage failure.
 Recovery also treats the commit's own `0700` directory preparation as a valid
 intermediate state. Before restoring a directory tree, it walks the host subtree
 and compares every entry with the journal operations and the base manifest.
-Files added by the user after the interruption, missing base entries, and
-content changes in unaffected descendants are reported instead of being deleted
-or overwritten. Temporary files created by the commit itself are ignored. The
-journal stays at `applying`/`restoring` so the user can remove the conflicting
-content and retry recovery.
+Rollback stops when it finds unexpected entries, missing base entries, changed
+descendants, or paths it cannot verify. Temporary-looking names are checked
+like any other path. The journal and backups remain available so the user can
+preserve the conflicting content before retrying recovery.
 
 `.git` and `.cowbox` are never committed. Default excluded paths such as
 `target/`, `node_modules/`, and `.venv/` are ignored unless
