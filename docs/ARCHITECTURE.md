@@ -94,6 +94,7 @@ It must be outside the workspace and on an xattr-capable Linux filesystem.
         ├── home/                        # redirected HOME
         ├── tmp/                         # redirected TMPDIR
         ├── cache/                       # redirected caches
+        ├── cache-overlays/              # session writable halves of host caches
         ├── layers/
         │   ├── compacted/<key>/         # validated physical mount-layer cache
         │   └── tmp/                     # unpublished compaction attempts
@@ -124,6 +125,7 @@ sequenceDiagram
     Helper->>Helper: unshare(CLONE_NEWPID)
     Helper->>Sup: spawn __supervisor (PID 1)
     Sup->>Sup: mount private procfs
+    Sup->>Sup: mount read-only host caches over session caches
     Sup->>Sup: apply Landlock policy
     Sup->>Cmd: spawn command
     Cmd-->>Sup: exit status
@@ -196,6 +198,26 @@ Finalized sessions include compaction artifacts in normal `gc` removal.
 `diff` and `commit` always read `steps/<n>/upper` for the logical chain. They do
 not substitute a compacted layer, so historical rollback and branching retain
 the original per-step semantics.
+
+### Host cache overlays
+
+When `.cowbox.toml` enables a host cache, the supervisor mounts a second OverlayFS
+inside the session mount namespace before applying Landlock:
+
+```text
+lowerdir=<host cache data, read-only>
+upperdir=<session>/cache-overlays/<tool>/upper
+workdir=<session>/cache-overlays/<tool>/work
+userxattr
+```
+
+The destination is the same path already exported as `CARGO_HOME`, npm's
+`NPM_CONFIG_CACHE`, or `PIP_CACHE_DIR`. Only cache data is mounted: Cargo
+`registry/` and `git/`, npm `_cacache/`, and the pip cache directory. Host
+credentials and configuration files are not part of the mount and remain
+outside the sandbox. Any cache write copies up to the session upper layer.
+Pip additionally receives a `PIP_FIND_LINKS` path for an optional read-only
+`wheelhouse/` under the cache root.
 
 ## 6. Diff
 
@@ -273,10 +295,11 @@ or storage failure.
 `tracing` spans cover namespace setup, mount, Landlock, diff, and commit.
 `--trace-chrome` emits a Chrome Trace JSON file. `doctor` runs static capability
 probes (namespace, overlay, `userxattr`, Landlock ABI, state filesystem, disk
-space). The whiteout kind is confirmed by the first real run, and latency is
-measured by `scripts/bench.sh`. `stats` reports logical step count, physical
-mount layers, compacted storage, rollback count, reaped orphans, incremental
-disk use, and whether network isolation is active.
+space) and reports configured Cargo/npm/pip host cache data sources. The
+whiteout kind is confirmed by the first real run, and latency is measured by
+`scripts/bench.sh`. `stats` reports logical step count, physical mount layers,
+compacted storage, rollback count, reaped orphans, incremental disk use, and
+whether network isolation is active.
 
 M1 does **not** count blocked writes: Landlock denials are silent. The field is
 reported as not instrumented rather than invented.
@@ -305,3 +328,4 @@ wrapper over `wsl.exe`) is M3. For M1:
 | Commit interrupted | journal restore; manual recovery path if restore fails |
 | Whiteout format differs from expectation | both char-device and xattr forms supported |
 | Layer compaction interrupted | originals untouched; temporary output is discarded and retried |
+| Configured host cache data is missing | actionable config error before the command runs |

@@ -212,6 +212,31 @@ layers uncompressed. `cowbox stats` reports both logical steps and the physical
 mount count, plus compacted-layer storage. A compaction cache is reused only
 when its recorded source list is an exact prefix of the current branch.
 
+### Host cache reuse
+
+Cargo, npm, and pip can explicitly reuse a host cache as a read-only data
+source. Add paths to `.cowbox.toml`:
+
+```toml
+[sandbox.host_caches]
+cargo = "/home/you/.cargo"     # mounts only registry/ and git/
+npm = "/home/you/.npm"         # mounts only _cacache/
+pip = "/home/you/.cache/pip"   # mounts cache data, including wheelhouse/
+```
+
+`true` selects the default cache under the host home; `false` keeps the original
+isolated-only behavior. cowbox mounts only the tool's data directories as
+read-only lower layers over a session-specific writable cache. Lock/index
+updates, new downloads, and extracted packages are written to the session
+cache, not the host. Credentials and tool configuration stay in the isolated
+session home. `cowbox doctor` lists each configured source and whether its data
+directories exist.
+
+For pip, a `wheelhouse/` directory under the configured cache root is exposed
+through `PIP_FIND_LINKS`, so pinned, hashed requirements can install with
+`--no-index` without network access. Other downloads still use the normal index
+and land in the session cache.
+
 ## Safety model
 
 - cowbox M1 uses **Landlock ABI 3** for path-based read/write fencing and a
@@ -238,6 +263,8 @@ when its recorded source list is an exact prefix of the current branch.
   not a power-loss or storage-failure guarantee.
 - Only `user.*` xattrs are preserved. Non-user xattr namespaces are kernel or
   security-managed and are left untouched.
+- Configured host caches are mounted read-only and only their data directories
+  are exposed. Session writes copy up into the session cache.
 - `.git` is never committed, even with `--include-excluded`. Device nodes,
   FIFOs, and sockets are refused. setuid/setgid bits are cleared on commit.
 - cowbox never silently falls back to a full directory copy when the OS CoW
@@ -274,7 +301,7 @@ instrumented yet.
 | --- | --- | --- |
 | **M1** | Linux/WSL2 CLI, snapshot DAG, OverlayFS, Landlock, commit journal, tests, benchmarks | Preview available |
 | **M1.5** | Windows launcher, `setup`, multi-harness skill installer, project rules and policy | Preview available |
-| **M2** | Long sessions, performance work, 200k-file benchmarks | Performance preview available; cache candidate pending merge |
+| **M2** | Long sessions, read-only host caches, performance work, 200k-file benchmarks | Preview available; network policy remains planned |
 | **M3** | MCP proxy with `cowbox_diff` / `cowbox_rollback` / `cowbox_commit` meta-tools | Planned |
 | **M4** | Native Windows ReFS + Job Object backend, macOS backend, eval suite and public leaderboard | Planned |
 

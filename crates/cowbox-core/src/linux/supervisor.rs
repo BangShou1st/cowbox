@@ -28,6 +28,7 @@ fn run_supervisor(spec: &RunSpec, started: Instant) -> Result<ExecResult> {
     fs::create_dir_all(&spec.cache_dir)?;
 
     mount::mount_proc()?;
+    mount::mount_cache_overlays(spec)?;
     landlock::apply(spec)?;
 
     let Some(program) = spec.cmd.first() else {

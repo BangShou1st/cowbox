@@ -45,12 +45,15 @@ Status: preview released in `0.3.0-m1`.
 ## M2: stronger containment and scale
 
 Status: performance preview `0.4.0-m2` is published. Long-session layer
-compaction and the regression round are on the pending merge candidate.
+compaction, read-only host cache reuse, and the regression round are on the
+pending merge candidate.
 
 - Network policy via seccomp user notification or Landlock ABI 4+ where the
   kernel supports it.
 - [x] Long-session physical layer compaction with logical DAG, diff, rollback,
   branching, and commit semantics preserved.
+- [x] Read-only Cargo/npm/pip host cache reuse with session-local copy-up,
+  explicit configuration, and doctor status.
 - 200k-file benchmark fixtures, first-round wall-clock measurements, and
   parallel first-session manifest capture.
 - [x] Benchmark regression tracking with a fixed release binary, 20 samples,

@@ -1544,6 +1544,95 @@ fn long_session_compacts_mount_layers_and_preserves_logical_diff() {
 }
 
 #[test]
+fn host_cache_mounts_are_read_only_sources_with_session_local_writes() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    env.init();
+    let (code, default_doctor) = env.json(&["doctor", "--json"]);
+    assert_eq!(code, 0, "default doctor failed: {default_doctor}");
+    assert!(
+        default_doctor["data"]["host_caches"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "host caches were enabled by default: {default_doctor}"
+    );
+
+    let host_cargo = env.state.path().join("host-cargo");
+    let host_npm = env.state.path().join("host-npm");
+    let host_pip = env.state.path().join("host-pip");
+    fs::create_dir_all(host_cargo.join("registry")).expect("cargo host cache");
+    fs::create_dir_all(host_npm.join("_cacache")).expect("npm host cache");
+    fs::create_dir_all(&host_pip).expect("pip host cache");
+    fs::write(host_cargo.join("registry/marker"), "cargo\n").expect("cargo marker");
+    fs::write(host_npm.join("_cacache/marker"), "npm\n").expect("npm marker");
+    fs::write(host_pip.join("marker"), "pip\n").expect("pip marker");
+    let config = env.workspace.path().join(".cowbox.toml");
+    let text = fs::read_to_string(&config).expect("config");
+    let text = text.replace(
+        "cargo = false\nnpm = false\npip = false",
+        &format!(
+            "cargo = {:?}\nnpm = {:?}\npip = {:?}",
+            host_cargo, host_npm, host_pip
+        ),
+    );
+    assert!(
+        text.contains(host_cargo.to_string_lossy().as_ref()),
+        "host cache configuration was not inserted"
+    );
+    fs::write(&config, text).expect("host cache config");
+
+    let (code, doctor) = env.json(&["doctor", "--json"]);
+    assert_eq!(code, 0, "cache doctor failed: {doctor}");
+    let caches = doctor["data"]["host_caches"]
+        .as_array()
+        .expect("host cache reports");
+    assert_eq!(caches.len(), 3, "unexpected host cache reports: {doctor}");
+    assert!(
+        caches
+            .iter()
+            .all(|cache| cache["available"].as_bool() == Some(true)),
+        "configured host caches were not available: {doctor}"
+    );
+
+    let (code, run) = run_script(
+        &env,
+        r#"test "$(cat "$CARGO_HOME/registry/marker")" = cargo
+test "$(cat "$NPM_CONFIG_CACHE/_cacache/marker")" = npm
+test "$(cat "$PIP_CACHE_DIR/marker")" = pip
+printf 'session cargo\n' > "$CARGO_HOME/registry/session-only"
+printf 'session npm\n' > "$NPM_CONFIG_CACHE/_cacache/session-only"
+printf 'session pip\n' > "$PIP_CACHE_DIR/session-only"
+"#,
+    );
+    assert_eq!(code, 0, "host cache mount run failed: {run}");
+    assert!(!host_cargo.join("registry/session-only").exists());
+    assert!(!host_npm.join("_cacache/session-only").exists());
+    assert!(!host_pip.join("session-only").exists());
+
+    let (code, second) = run_script(
+        &env,
+        r#"test "$(cat "$CARGO_HOME/registry/session-only")" = "session cargo"
+test "$(cat "$NPM_CONFIG_CACHE/_cacache/session-only")" = "session npm"
+test "$(cat "$PIP_CACHE_DIR/session-only")" = "session pip""#,
+    );
+    assert_eq!(code, 0, "session cache did not persist: {second}");
+    assert_eq!(
+        fs::read_to_string(host_cargo.join("registry/marker")).expect("cargo host marker"),
+        "cargo\n"
+    );
+    assert_eq!(
+        fs::read_to_string(host_npm.join("_cacache/marker")).expect("npm host marker"),
+        "npm\n"
+    );
+    assert_eq!(
+        fs::read_to_string(host_pip.join("marker")).expect("pip host marker"),
+        "pip\n"
+    );
+}
+
+#[test]
 fn nine_p_smoke_is_opt_in_and_cleans_up() {
     if std::env::var("COWBOX_TEST_9P").as_deref() != Ok("1")
         || !Path::new("/mnt/e/project").is_dir()

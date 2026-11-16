@@ -1,4 +1,5 @@
 use crate::doctor;
+use crate::doctor::HostCacheReport;
 use crate::state::SessionRecord;
 use cowbox_core::Capabilities;
 use cowbox_core::{ChangeKind, EntryKind, FileChange};
@@ -205,7 +206,12 @@ pub fn print_stats(stats: &Stats) {
     );
 }
 
-pub fn print_doctor(capabilities: &Capabilities, state_root: &Path, ready: bool) {
+pub fn print_doctor(
+    capabilities: &Capabilities,
+    state_root: &Path,
+    host_caches: &[HostCacheReport],
+    ready: bool,
+) {
     println!("cowbox doctor ({})", env!("CARGO_PKG_VERSION"));
     println!("State root: {}", state_root.display());
     println!();
@@ -275,6 +281,33 @@ pub fn print_doctor(capabilities: &Capabilities, state_root: &Path, ready: bool)
         doctor::state_fs_ready(capabilities),
         state_detail,
     );
+    if host_caches.is_empty() {
+        println!("[ok] Host caches: none configured; sessions use isolated caches");
+    } else {
+        for cache in host_caches {
+            let paths = cache
+                .paths
+                .iter()
+                .map(|path| {
+                    format!(
+                        "{} {}",
+                        path.name,
+                        if path.available {
+                            "available"
+                        } else {
+                            "missing"
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            line(
+                &format!("{} host cache", cache.tool),
+                cache.available,
+                &format!("{} ({paths})", cache.source.display()),
+            );
+        }
+    }
     for note in &capabilities.notes {
         println!("  note: {note}");
     }

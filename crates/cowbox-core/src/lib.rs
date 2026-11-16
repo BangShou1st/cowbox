@@ -26,7 +26,7 @@ pub use model::{
     Capabilities, ChangeKind, CommitOptions, CommitRecoveryAction, CommitReport, DiffOptions,
     EntryKind, ExecOutcome, FileChange, LayerUsage, PendingRecovery, RecoveryReport, WhiteoutKind,
 };
-pub use policy::ExecPolicy;
+pub use policy::{ExecPolicy, HostCacheKind, HostCacheSource};
 
 use std::ffi::OsString;
 use std::path::Path;

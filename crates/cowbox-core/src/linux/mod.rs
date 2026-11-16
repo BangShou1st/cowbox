@@ -20,8 +20,9 @@ use crate::model::{
     Capabilities, CommitOptions, CommitReport, DiffOptions, ExecOutcome, FileChange, LayerUsage,
 };
 use crate::policy::ExecPolicy;
+use crate::policy::{HostCacheKind, HostCacheSource};
 use rustix::process::{Pid, Signal, getgid, getuid, kill_process_group};
-use spec::{ExecResult, RunSpec};
+use spec::{CacheMountSpec, ExecResult, RunSpec};
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -97,6 +98,12 @@ impl SandboxBackend for LinuxBackend {
                 reason: format!("step directory {} already exists", step_dir.display()),
             });
         }
+        if !policy.isolate_caches && !policy.host_cache_sources.is_empty() {
+            return Err(CoreError::Config(
+                "host cache reuse requires isolate_caches = true".to_string(),
+            ));
+        }
+        let cache_mounts = build_cache_mounts(layout, &policy.host_cache_sources)?;
         let mount_layers = compact::prepare_mount_layers(layout, step_id, parent_layers)?;
         fs::create_dir_all(layout.upper_dir(step_id))?;
         fs::create_dir_all(layout.work_dir(step_id))?;
@@ -131,6 +138,7 @@ impl SandboxBackend for LinuxBackend {
             isolate_caches: policy.isolate_caches,
             extra_ro_paths: policy.extra_ro_paths.clone(),
             extra_rw_paths: policy.extra_rw_paths.clone(),
+            cache_mounts,
             timeout_ms: policy
                 .timeout
                 .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
@@ -291,6 +299,85 @@ fn helper_exe() -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
     Ok(std::env::current_exe()?)
+}
+
+fn build_cache_mounts(
+    layout: &SessionLayout,
+    sources: &[HostCacheSource],
+) -> Result<Vec<CacheMountSpec>> {
+    let mut mounts = Vec::new();
+    for source in sources {
+        if !source.root.is_dir() {
+            return Err(CoreError::Config(format!(
+                "configured {} host cache root is not a directory: {}",
+                source.kind.as_str(),
+                source.root.display()
+            )));
+        }
+        match source.kind {
+            HostCacheKind::Cargo => {
+                let before = mounts.len();
+                for name in ["registry", "git"] {
+                    let data = source.root.join(name);
+                    if data.is_dir() {
+                        mounts.push(cache_mount(
+                            layout,
+                            format!("cargo-{name}"),
+                            data,
+                            layout.cache_dir().join("cargo").join(name),
+                        ));
+                    }
+                }
+                if mounts.len() == before {
+                    return Err(CoreError::Config(format!(
+                        "configured Cargo host cache has no registry or git data directory under {}",
+                        source.root.display()
+                    )));
+                }
+            }
+            HostCacheKind::Npm => {
+                let data = source.root.join("_cacache");
+                if !data.is_dir() {
+                    return Err(CoreError::Config(format!(
+                        "configured npm host cache has no _cacache directory under {}",
+                        source.root.display()
+                    )));
+                }
+                mounts.push(cache_mount(
+                    layout,
+                    "npm".to_string(),
+                    data,
+                    layout.cache_dir().join("npm").join("_cacache"),
+                ));
+            }
+            HostCacheKind::Pip => mounts.push(cache_mount(
+                layout,
+                "pip".to_string(),
+                source.root.clone(),
+                layout.cache_dir().join("pip"),
+            )),
+        }
+    }
+    Ok(mounts)
+}
+
+fn cache_mount(
+    layout: &SessionLayout,
+    tool: String,
+    source: PathBuf,
+    destination: PathBuf,
+) -> CacheMountSpec {
+    let meta_dir = layout
+        .session_dir
+        .join("cache-overlays")
+        .join(tool.replace('/', "-"));
+    CacheMountSpec {
+        tool,
+        source,
+        destination,
+        upper_dir: meta_dir.join("upper"),
+        work_dir: meta_dir.join("work"),
+    }
 }
 
 fn build_layer_aliases(

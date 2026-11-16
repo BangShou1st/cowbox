@@ -16,12 +16,20 @@ All notable changes to this project are documented here. The format follows
   under an atomic rename. Reuse requires an exact source-prefix match on the
   active branch. `stats` now reports logical steps, mounted layers, compacted
   layer count, and compacted storage.
+- Explicit read-only host cache reuse for Cargo, npm, and pip through
+  `[sandbox.host_caches]`. Only cache data directories are mounted; index
+  refreshes, downloads, and other writes copy up into the session cache.
+  Credentials and configuration remain in the isolated session home. `doctor`
+  reports configured sources and data-directory availability.
+- Pip wheelhouse reuse through `PIP_FIND_LINKS` under the configured cache root,
+  supporting pinned, hashed, offline installs.
+
 ### Changed
 
 - `cowbox stats` preserves the existing `steps` field and adds `logical_steps`,
   `mounted_layers`, `compact_layers`, and `compacted_bytes`.
-- Session disk accounting includes compaction artifacts, and finalized sessions
-  include them in normal `gc` removal.
+- Session disk accounting includes compaction artifacts and host-cache overlay
+  storage. Finalized sessions include both in normal `gc` removal.
 
 ## [0.4.0-m2] - 2026-11-16
 

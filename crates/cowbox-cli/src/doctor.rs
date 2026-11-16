@@ -6,9 +6,26 @@ use crate::error::CliResult;
 use crate::workspace;
 use cowbox_core::Capabilities;
 #[cfg(not(windows))]
+use cowbox_core::HostCacheKind;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub const REQUIRED_LANDLOCK_ABI: i32 = 3;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostCachePathReport {
+    pub name: String,
+    pub path: PathBuf,
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostCacheReport {
+    pub tool: String,
+    pub source: PathBuf,
+    pub available: bool,
+    pub paths: Vec<HostCachePathReport>,
+}
 
 #[cfg(not(windows))]
 #[derive(Debug)]
@@ -24,6 +41,46 @@ pub fn diagnostic_context() -> CliResult<DiagnosticContext> {
     let state_root_setting = workspace::state_root_setting()?;
     let state_root = workspace::diagnostic_state_root(&state_root_setting, &workspace)?;
     Ok(DiagnosticContext { state_root })
+}
+
+#[cfg(not(windows))]
+pub fn host_cache_reports(
+    config: &Config,
+    workspace: &std::path::Path,
+) -> CliResult<Vec<HostCacheReport>> {
+    let mut reports = Vec::new();
+    for source in config.host_cache_sources(workspace)? {
+        let paths = match source.kind {
+            HostCacheKind::Cargo => ["registry", "git"]
+                .into_iter()
+                .map(|name| HostCachePathReport {
+                    name: name.to_string(),
+                    path: source.root.join(name),
+                    available: source.root.join(name).is_dir(),
+                })
+                .collect::<Vec<_>>(),
+            HostCacheKind::Npm => {
+                let path = source.root.join("_cacache");
+                vec![HostCachePathReport {
+                    name: "_cacache".to_string(),
+                    available: path.is_dir(),
+                    path,
+                }]
+            }
+            HostCacheKind::Pip => vec![HostCachePathReport {
+                name: "cache".to_string(),
+                path: source.root.clone(),
+                available: source.root.is_dir(),
+            }],
+        };
+        reports.push(HostCacheReport {
+            tool: source.kind.as_str().to_string(),
+            source: source.root,
+            available: paths.iter().any(|path| path.available),
+            paths,
+        });
+    }
+    Ok(reports)
 }
 
 #[cfg(any(not(windows), test))]

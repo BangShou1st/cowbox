@@ -188,10 +188,24 @@ commit 或 discard 后的 session 会保留用于审计。`cowbox sessions` 可�
 `cowbox gc` 默认删除 7 天前的 finalized session，绝不会删除 active session。
 `--all` 忽略时间阈值，`--dry-run` 预览，`--yes` 用于非交互执行。
 
-### 长会话
+### 长会话与宿主缓存
 
 跨过物理层数或 lowerdir 长度限制时，cowbox 会自动压缩当前分支最旧的一段祖先层，
 保留近期层不压缩。只有压缩记录的逻辑层列表与当前分支祖先链完全匹配时才会复用。
+
+Cargo、npm 和 pip 可以在 `.cowbox.toml` 中显式复用宿主缓存：
+
+```toml
+[sandbox.host_caches]
+cargo = "/home/you/.cargo"     # 只挂载 registry/ 与 git/
+npm = "/home/you/.npm"         # 只挂载 _cacache/
+pip = "/home/you/.cache/pip"   # 挂载缓存数据，包括 wheelhouse/
+```
+
+`true` 使用宿主 home 下的默认缓存，`false` 保持原来的纯隔离模式。缓存数据以只读
+lowerdir 挂载，索引刷新、新下载和解包写入会话自己的 upper 缓存；宿主凭据和工具
+配置仍留在隔离 HOME 中。`cowbox doctor` 会列出配置的缓存源及可用状态。pip 的
+`wheelhouse/` 会通过 `PIP_FIND_LINKS` 暴露，支持带哈希锁定的离线安装。
 
 ## 安全模型
 
@@ -210,6 +224,7 @@ commit 或 discard 后的 session 会保留用于审计。`cowbox sessions` 可�
   记录与 active 指针清除均已持久化之后。恢复发现受影响路径被外部修改时会报错并
   保留备份材料。这里保证的是进程中断恢复，不包括断电或存储故障保证。
 - 只保留 `user.*` xattr；其他 xattr 命名空间由内核或安全模块管理，不会被改写。
+- 宿主缓存只读且只暴露缓存数据目录；会话写入 copy-up 到会话缓存。
 - `.git` 永远不提交，即使使用 `--include-excluded`。device、FIFO、socket 拒绝提交；
   setuid/setgid 位在 commit 时清除。
 - OverlayFS 不可用时，cowbox 不会静默降级为全量目录复制，而是返回明确错误。
@@ -242,7 +257,7 @@ commit 或 discard 后的 session 会保留用于审计。`cowbox sessions` 可�
 | --- | --- | --- |
 | **M1** | Linux/WSL2 CLI、快照 DAG、OverlayFS、Landlock、commit journal、测试、基准 | 预览可用 |
 | **M1.5** | Windows 启动器、`setup`、多 harness skill 安装、项目规则与策略 | 预览可用 |
-| **M2** | 长会话、性能优化、20 万文件基准 | 性能预览可用；缓存候选待合并 |
+| **M2** | 长会话、只读宿主缓存、性能优化、20 万文件基准 | 预览可用；网络策略仍在计划中 |
 | **M3** | MCP 代理（`cowbox_diff` / `cowbox_rollback` / `cowbox_commit`） | 计划中 |
 | **M4** | Windows 原生 ReFS + Job Object 后端、macOS 后端、Eval 套件与公开榜单 | 计划中 |
 

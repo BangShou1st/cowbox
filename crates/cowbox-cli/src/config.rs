@@ -2,7 +2,7 @@ use crate::error::{CliError, CliResult};
 use crate::workspace::resolve_path;
 use clap::ValueEnum;
 use cowbox_core::policy::DEFAULT_EXCLUDES;
-use cowbox_core::{CommitOptions, DiffOptions, ExecPolicy};
+use cowbox_core::{CommitOptions, DiffOptions, ExecPolicy, HostCacheKind, HostCacheSource};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -72,6 +72,29 @@ pub struct SandboxConfig {
     pub extra_ro_paths: Vec<PathBuf>,
     #[serde(default)]
     pub extra_rw_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub host_caches: HostCachesConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum HostCacheSetting {
+    Enabled(bool),
+    Path(PathBuf),
+}
+
+impl Default for HostCacheSetting {
+    fn default() -> Self {
+        Self::Enabled(false)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct HostCachesConfig {
+    pub cargo: HostCacheSetting,
+    pub npm: HostCacheSetting,
+    pub pip: HostCacheSetting,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +146,7 @@ impl Default for SandboxConfig {
             clean_env: false,
             extra_ro_paths: Vec::new(),
             extra_rw_paths: Vec::new(),
+            host_caches: HostCachesConfig::default(),
         }
     }
 }
@@ -196,6 +220,14 @@ isolate_caches = true
 clean_env = false
 extra_ro_paths = []
 extra_rw_paths = []
+
+[sandbox.host_caches]
+# false uses only the isolated session cache. true selects the default host
+# cache. A path selects a custom cache root. Only data subdirectories are
+# mounted; host credentials and tool configuration remain isolated.
+cargo = false
+npm = false
+pip = false
 
 [diff]
 line_stats = true
@@ -281,6 +313,7 @@ max_files_without_prompt = 5
             excluded: self.diff.excluded.clone(),
             capture_output,
             cwd: None,
+            host_cache_sources: self.sandbox.host_caches.sources(workspace)?,
         })
     }
 
@@ -307,6 +340,82 @@ max_files_without_prompt = 5
             excluded: self.diff.excluded.clone(),
         }
     }
+
+    pub fn host_cache_sources(&self, workspace: &Path) -> CliResult<Vec<HostCacheSource>> {
+        self.sandbox.host_caches.sources(workspace)
+    }
+}
+
+impl HostCachesConfig {
+    pub fn sources(&self, workspace: &Path) -> CliResult<Vec<HostCacheSource>> {
+        let mut sources = Vec::new();
+        self.push_source(
+            &mut sources,
+            HostCacheKind::Cargo,
+            &self.cargo,
+            workspace,
+            "cargo",
+        )?;
+        self.push_source(
+            &mut sources,
+            HostCacheKind::Npm,
+            &self.npm,
+            workspace,
+            "npm",
+        )?;
+        self.push_source(
+            &mut sources,
+            HostCacheKind::Pip,
+            &self.pip,
+            workspace,
+            "pip",
+        )?;
+        Ok(sources)
+    }
+
+    fn push_source(
+        &self,
+        sources: &mut Vec<HostCacheSource>,
+        kind: HostCacheKind,
+        setting: &HostCacheSetting,
+        workspace: &Path,
+        label: &str,
+    ) -> CliResult<()> {
+        let root = match setting {
+            HostCacheSetting::Enabled(false) => return Ok(()),
+            HostCacheSetting::Enabled(true) => {
+                let home = host_home()?;
+                match kind {
+                    HostCacheKind::Cargo => home.join(".cargo"),
+                    HostCacheKind::Npm => home.join(".npm"),
+                    HostCacheKind::Pip => home.join(".cache").join("pip"),
+                }
+            }
+            HostCacheSetting::Path(path) if path.as_os_str().is_empty() => {
+                return Err(CliError::new(
+                    "CONFIG_ERROR",
+                    format!("{label} host cache path cannot be empty"),
+                )
+                .exit(2));
+            }
+            HostCacheSetting::Path(path) => resolve_path(workspace, path),
+        };
+        sources.push(HostCacheSource { kind, root });
+        Ok(())
+    }
+}
+
+fn host_home() -> CliResult<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            CliError::new(
+                "HOME_UNAVAILABLE",
+                "host cache setting `true` requires HOME or USERPROFILE",
+            )
+            .exit(2)
+        })
 }
 
 pub fn parse_timeout(value: &str) -> CliResult<Option<Duration>> {
@@ -348,4 +457,46 @@ fn default_excluded() -> Vec<String> {
         .iter()
         .map(|item| (*item).to_string())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_cache_settings_accept_boolean_and_path_forms() {
+        let config: Config = toml::from_str(
+            r#"version = 1
+
+[sandbox.host_caches]
+cargo = true
+npm = "/var/cache/npm"
+pip = false
+"#,
+        )
+        .expect("config");
+        assert_eq!(
+            config.sandbox.host_caches.cargo,
+            HostCacheSetting::Enabled(true)
+        );
+        assert_eq!(
+            config.sandbox.host_caches.npm,
+            HostCacheSetting::Path(PathBuf::from("/var/cache/npm"))
+        );
+        assert_eq!(
+            config.sandbox.host_caches.pip,
+            HostCacheSetting::Enabled(false)
+        );
+    }
+
+    #[test]
+    fn host_caches_are_disabled_by_default() {
+        let config = Config::default();
+        assert!(
+            config
+                .host_cache_sources(Path::new("/tmp/workspace"))
+                .expect("sources")
+                .is_empty()
+        );
+    }
 }
