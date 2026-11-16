@@ -1,5 +1,46 @@
 # Release verification
 
+## v0.7.1-m4 Windows write-back recovery patch
+
+- Tag: `v0.7.1-m4`
+- Release commit: `bae8522`
+- Release workflow: https://github.com/BangShou1st/cowbox/actions/runs/43901921013
+- Release: https://github.com/BangShou1st/cowbox/releases/tag/v0.7.1-m4
+- Type: GitHub pre-release
+
+Published archive hashes:
+
+| Asset | SHA-256 |
+| --- | --- |
+| `cowbox-v0.7.1-m4-x86_64-unknown-linux-gnu.tar.gz` | `554520c794545e421e65dfdb7ee0082eb60c1c80d7f69eaccde71b35df8387ae` |
+| `cowbox-v0.7.1-m4-x86_64-pc-windows-msvc.zip` | `959e6540e0bf4673da00e0f8021c807ee0fbabcd079b4b25a0a62838802f6812` |
+
+Downloaded assets were re-hashed and matched their published `.sha256` files.
+
+Extracted binary hashes:
+
+| Binary | SHA-256 |
+| --- | --- |
+| Linux `cowbox` | `e0cb2772c3342885f739eb4cdaef9697f2ac31388b9ea03432f4efeb62bf7bdf` |
+| Windows `cowbox.exe` | `dd59684c739132dbb950d272cac3e3901acceb4e906c30763fcf1f7abc04f2b3` |
+
+Acceptance used only the downloaded Windows ZIP:
+
+1. `cowbox.exe --version` reported `0.7.1-m4`; the archive and extracted EXE
+   hashes matched the published checksums.
+2. P1: a commit injected after the first operation was written but before its
+   journal accounting exited 70. `win commit --recover` exited 0 and restored
+   both host files to `A0`/`B0`.
+3. P2: a read-only host file held without delete sharing was refused with
+   `WIN_FILE_BUSY`. The file remained read-only and still contained `A0`.
+4. P3: both `file-to-dir` and `dir-to-file` swaps passed the dry-run preview
+   (`can_commit=true`), committed successfully, and produced the expected host
+   node types and contents.
+5. Windows CI passed the 18-test native suite, the existing agent/CLI tests,
+   and the Linux adversarial/MCP/smoke suites on Ubuntu 22.04 and 24.04.
+
+No release asset was rebuilt or modified during acceptance.
+
 ## v0.7.0-m4 native Windows snapshot editing preview
 
 - Tag: `v0.7.0-m4`
