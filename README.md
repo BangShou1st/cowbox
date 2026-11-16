@@ -434,10 +434,10 @@ added 0.47 ms to the 10k first-run median and 0.38 ms to the one-parent median.
 
 The `v0.6.0-m3` candidate repeated the gates against the published
 `v0.5.0-m2` Linux release with 20 samples and one warm-up. First-run
-median / P95 was 33.70 / 40.41 ms at 10k files and 120.55 / 142.02 ms at
-200k files. Candidate 10-file diff median / P95 was 7.17 / 14.54 ms at 10k
-and 88.60 / 97.21 ms at 200k. The MCP first handshake was 83.855 / 107.503 ms
-median / P95; continuous same-session tool calls were 103.028 / 164.157 ms,
+median / P95 was 32.62 / 40.14 ms at 10k files and 117.53 / 126.46 ms at
+200k files. Candidate 10-file diff median / P95 was 8.37 / 10.94 ms at 10k
+and 85.02 / 88.28 ms at 200k. The MCP first handshake was 85.019 / 107.503 ms
+median / P95; continuous same-session tool calls were 102.106 / 123.316 ms,
 including a fresh sandbox step and upstream process handshake per call.
 
 See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for full statistics, fixtures,

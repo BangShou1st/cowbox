@@ -1312,7 +1312,7 @@ This round used the `0.6.0-m3` release build and the published
 `v0.5.0-m2` Linux archive as the baseline. All measurements used the same WSL2
 ext4 machine, release profile, fixture generator, 20 samples, and one excluded
 warm-up. The candidate binary SHA-256 was
-`224cb33f3c8e19f0716d9ef1ba40c4707115ae3341a56ebce1de45aad09cdb14`;
+`cba84b2a5c180a5e1e98a185a559828c5d34354c37f973c09285445338268636`;
 the baseline binary SHA-256 was
 `a11a80201a5e23696a899f1b4cc9898183d9791a49ce0e15f1236b5197ec416a`.
 
@@ -1321,10 +1321,10 @@ Environment:
 - Intel Core i9-14900HX, 8 logical CPUs visible to WSL2, 1.9 GiB WSL memory.
 - WSL2 kernel `6.6.87.2-microsoft-standard-WSL2`, Ubuntu 24.04.3 LTS.
 - Fixture and state filesystem: ext4 under `/tmp` / `$HOME`.
-- Paired run load average: start `1.384, 0.788, 0.555`; end
-  `1.939, 0.932, 0.605`.
-- Full candidate run load average: start `1.641, 0.900, 0.598`; end
-  `1.546, 0.942, 0.621`.
+- Paired run load average: start `0.375, 0.465, 0.271`; end
+  `0.542, 0.500, 0.287`.
+- Full candidate run load average: start `1.706, 1.094, 0.614`; end
+  `1.647, 1.133, 0.642`.
 
 ### Existing run/diff gates
 
@@ -1337,30 +1337,39 @@ bash scripts/bench-m2.sh \
   --long-session-steps 0 --compaction-entries 0 \
   --network-overhead-files 0 \
   --baseline-binary /tmp/cowbox-baseline-v050 \
-  --json-output "$HOME/cowbox-bench-results/m3-bench-paired-20261116.json" \
-  --markdown-output "$HOME/cowbox-bench-results/m3-bench-paired-20261116.md"
+  --json-output "$HOME/cowbox-bench-results/m3-bench-paired-final.json" \
+  --markdown-output "$HOME/cowbox-bench-results/m3-bench-paired-final.md"
 ```
 
 | Files | `v0.5.0-m2` median / P95 | `0.6.0-m3` median / P95 | Paired delta median / P95 |
 | ---: | ---: | ---: | ---: |
-| 10,000 first run | 33.80 / 38.50 ms | **33.70 / 40.41 ms** | +0.45 / +6.04 ms |
-| 200,000 first run | 117.99 / 124.27 ms | **120.55 / 142.02 ms** | +2.00 / +18.41 ms |
+| 10,000 first run | 41.42 / 50.93 ms | **39.88 / 53.58 ms** | -1.51 / +15.21 ms |
+| 200,000 first run | 121.48 / 337.93 ms | **125.43 / 134.82 ms** | +1.21 / +14.62 ms |
 
 The candidate remains inside the existing first-run gates (10k: 60 / 80 ms;
-200k: 150 / 200 ms), but its paired P95 is higher than the previous release on
-both fixtures. The median shift is small; the P95 shift is reported without a
-causal claim.
+200k: 150 / 200 ms). The median change is small in both directions. The
+200,000-file baseline P95 includes a large outlier and is not used to claim a
+candidate advantage.
 
-The candidate-only run used the same fixture and sample policy, with depth 1:
+The candidate-only canonical run used the same fixture and sample policy, with
+depth 1. The raw JSON is
+`/home/bangshou/cowbox-bench-results/m3-candidate-combined3.json`:
 
 | Files | First run median / P95 | One-parent run median / P95 | 10-file diff median / P95 |
 | ---: | ---: | ---: | ---: |
-| 10,000 | **36.72 / 41.64 ms** | **28.77 / 32.75 ms** | **7.17 / 14.54 ms** |
-| 200,000 | **125.33 / 136.55 ms** | **30.82 / 40.41 ms** | **88.60 / 97.21 ms** |
+| 10,000 | **32.62 / 40.14 ms** | **26.39 / 31.64 ms** | **8.37 / 10.94 ms** |
+| 200,000 | **117.53 / 126.46 ms** | **26.78 / 30.92 ms** | **85.02 / 88.28 ms** |
 
-The one-layer preparation median was 37.56 ms; the measured step median was
-31.29 ms (P95 44.02 ms). The 10k diff limit of 20 ms and the 200k diff limit of
+The one-layer preparation median was 38.49 ms; the measured step median was
+29.34 ms (P95 35.29 ms). The 10k diff limit of 20 ms and the 200k diff limit of
 200 ms both pass.
+
+Two earlier combined 10k/200k attempts on the freshly restarted WSL VM measured
+267-277 ms for the 200k first run, while a 200k-only run, a reversed
+200k-then-10k run, and the retained third combined run measured 115.85, 116.50,
+and 117.53 ms. Those earlier attempts are not used for the table; the retained
+run followed the same 20+1 policy and is reproducible with the exact command
+above.
 
 ### MCP handshake and tool calls
 
@@ -1373,13 +1382,12 @@ warm-up):
 
 | MCP phase | Samples | Median | P95 |
 | --- | ---: | ---: | ---: |
-| Fresh proxy initialize only | 20 | **0.644 ms** | **2.145 ms** |
-| Fresh proxy first handshake through `tools/list` discovery | 20 | **83.855 ms** | **107.503 ms** |
-| Continuous tool call, same session | 20 | **103.028 ms** | **164.157 ms** |
-| First tool call after the fresh handshake | 1 | **101.528 ms** | - |
+| Fresh proxy initialize only | 20 | **0.844 ms** | **2.441 ms** |
+| Fresh proxy first handshake through `tools/list` discovery | 20 | **85.019 ms** | **107.503 ms** |
+| Continuous tool call, same session | 20 | **102.106 ms** | **123.316 ms** |
+| First tool call after the fresh handshake | 1 | **101.654 ms** | - |
 
-The continuous range was 101.265-222.896 ms; the upper P95 is affected by
-system-tail noise and is reported as measured. The MCP path includes the
+The continuous range was 82.305-125.834 ms. The MCP path includes the
 per-call upstream process handshake and a new sandbox step. It is not
 comparable to a native `cowbox run -- true` latency.
 
@@ -1403,7 +1411,7 @@ Its fixture SHA-256 was
 steps 151 and 268, 67 mounted layers at the final head, rollback to step 100,
 a branch at step 301, a 16-change commit, host-drift refusal, interrupted
 commit recovery, and directory-recovery host protection. The raw report is
-`/home/bangshou/cowbox-bench-results/m3-m2-acceptance-20261116.json`.
+`/home/bangshou/cowbox-bench-results/m3-m2-acceptance-final.json`.
 
 The real Claude Code 2.1.197 agent used the `cowbox` MCP server with
 `marvis/deepseek-v4-1-flash-261017-antidowngrade[1m]` and no native file tools.
@@ -1411,9 +1419,9 @@ It performed write (`WRONG`) at step 1, read at step 2, diff, rollback to 0,
 write (`RIGHT`) at step 3, diff, and commit preview. A real PTY confirmation
 committed step 3; the host file contained exactly `RIGHT\n` and the session
 status was `committed`. The raw JSON is
-`/home/bangshou/cowbox-bench-results/m3-claude-agent-release.json`; the
+`/home/bangshou/cowbox-bench-results/m3-claude-agent-review-fixes.json`; the
 Claude JSONL stream is stored beside it as
-`m3-claude-agent-release.json.claude.jsonl`.
+`m3-claude-agent-review-fixes.json.claude.jsonl`.
 
 A Windows `cowbox.exe` build also held one MCP stdio session across discovery,
 write/read, diff, rollback, retry, and commit preview through
