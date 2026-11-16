@@ -58,6 +58,7 @@ pub fn dispatch(command: &CliCommand) -> CliResult<i32> {
         CliCommand::Update(args) => command_update(args),
         CliCommand::Path(args) => command_path(args),
         CliCommand::McpProxy(args) => command_mcp_proxy(args),
+        CliCommand::Win(args) => crate::win::dispatch(args),
         CliCommand::McpAdapter(args) => command_mcp_adapter(args),
         CliCommand::SandboxExec(args) => command_hidden(args, true),
         CliCommand::Supervisor(args) => command_hidden(args, false),

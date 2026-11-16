@@ -59,6 +59,8 @@ pub enum CliCommand {
     Path(PathArgs),
     /// Proxy a stdio MCP server through cowbox snapshots.
     McpProxy(McpProxyArgs),
+    /// Manage a native Windows NTFS snapshot-editing session.
+    Win(WinArgs),
 
     #[command(name = "__mcp-adapter", hide = true)]
     McpAdapter(McpAdapterArgs),
@@ -335,6 +337,138 @@ pub struct McpProxyArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct WinArgs {
+    #[command(subcommand)]
+    pub command: WinCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WinCommand {
+    /// Check the native Windows workspace, state root, and NTFS capabilities.
+    Doctor(WinDoctorArgs),
+    /// Import a workspace into a native Windows managed session.
+    Init(WinInitArgs),
+    /// Save the current managed workspace as a DAG step.
+    Checkpoint(WinCheckpointArgs),
+    /// Show the Windows session DAG.
+    Log(WinLogArgs),
+    /// Show changes between the base step and a Windows step.
+    Diff(WinDiffArgs),
+    /// Move the Windows session head to a historical step.
+    Rollback(WinRollbackArgs),
+    /// Preview, apply, or recover a Windows host commit.
+    Commit(WinCommitArgs),
+    /// Remove a Windows session and its managed files.
+    Discard(WinDiscardArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WinDoctorArgs {
+    #[arg(long)]
+    pub workspace: Option<PathBuf>,
+    #[arg(long = "state-root")]
+    pub state_root: Option<PathBuf>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WinInitArgs {
+    #[arg(long)]
+    pub workspace: PathBuf,
+    #[arg(long = "state-root")]
+    pub state_root: PathBuf,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WinCheckpointArgs {
+    #[arg(long)]
+    pub session: String,
+    #[arg(long = "state-root")]
+    pub state_root: Option<PathBuf>,
+    #[arg(long)]
+    pub label: Option<String>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WinLogArgs {
+    #[arg(long)]
+    pub session: Option<String>,
+    #[arg(long = "state-root")]
+    pub state_root: Option<PathBuf>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WinDiffArgs {
+    #[arg(long)]
+    pub session: Option<String>,
+    #[arg(long = "state-root")]
+    pub state_root: Option<PathBuf>,
+    #[arg(long)]
+    pub step: Option<u64>,
+    #[arg(long)]
+    pub stat: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WinRollbackArgs {
+    pub step: u64,
+    #[arg(long)]
+    pub session: String,
+    #[arg(long = "state-root")]
+    pub state_root: Option<PathBuf>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WinCommitArgs {
+    #[arg(long)]
+    pub session: String,
+    #[arg(long = "state-root")]
+    pub state_root: Option<PathBuf>,
+    #[arg(long)]
+    pub step: Option<u64>,
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
+    #[arg(long)]
+    pub force: bool,
+    #[arg(
+        long,
+        help = "Recover the latest interrupted native Windows commit",
+        conflicts_with_all = ["step", "dry_run", "force"]
+    )]
+    pub recover: bool,
+    #[arg(
+        long,
+        help = "Skip the interactive prompt; use only after explicit human approval"
+    )]
+    pub yes: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WinDiscardArgs {
+    #[arg(long)]
+    pub session: String,
+    #[arg(long = "state-root")]
+    pub state_root: Option<PathBuf>,
+    #[arg(long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct McpAdapterArgs {
     #[arg(long = "max-response-bytes", default_value_t = 768 * 1024)]
     pub max_response_bytes: usize,
@@ -369,6 +503,7 @@ impl CliCommand {
             CliCommand::Update(_) => "update",
             CliCommand::Path(_) => "path",
             CliCommand::McpProxy(_) => "mcp-proxy",
+            CliCommand::Win(args) => args.command.name(),
             CliCommand::McpAdapter(_) => "__mcp-adapter",
             CliCommand::SandboxExec(_) => "__sandbox-exec",
             CliCommand::Supervisor(_) => "__supervisor",
@@ -397,6 +532,7 @@ impl CliCommand {
             CliCommand::Update(args) => args.json,
             CliCommand::Path(args) => args.json,
             CliCommand::McpProxy(_) | CliCommand::McpAdapter(_) => false,
+            CliCommand::Win(args) => args.command.json(),
             _ => false,
         }
     }
@@ -406,6 +542,34 @@ impl CliCommand {
             CliCommand::Run(args) => args.trace_chrome.as_ref(),
             CliCommand::Doctor(args) => args.trace_chrome.as_ref(),
             _ => None,
+        }
+    }
+}
+
+impl WinCommand {
+    pub fn name(&self) -> &'static str {
+        match self {
+            WinCommand::Doctor(_) => "win doctor",
+            WinCommand::Init(_) => "win init",
+            WinCommand::Checkpoint(_) => "win checkpoint",
+            WinCommand::Log(_) => "win log",
+            WinCommand::Diff(_) => "win diff",
+            WinCommand::Rollback(_) => "win rollback",
+            WinCommand::Commit(_) => "win commit",
+            WinCommand::Discard(_) => "win discard",
+        }
+    }
+
+    pub fn json(&self) -> bool {
+        match self {
+            WinCommand::Doctor(args) => args.json,
+            WinCommand::Init(args) => args.json,
+            WinCommand::Checkpoint(args) => args.json,
+            WinCommand::Log(args) => args.json,
+            WinCommand::Diff(args) => args.json,
+            WinCommand::Rollback(args) => args.json,
+            WinCommand::Commit(args) => args.json,
+            WinCommand::Discard(args) => args.json,
         }
     }
 }

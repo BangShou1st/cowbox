@@ -17,8 +17,9 @@ changed by `cowbox commit`.
    - `ask`: ask the user before starting a session.
    - `auto`: start a session without asking.
 3. Run `cowbox doctor` once per project/environment. On Windows this checks the
-   WSL distro and Linux binary; on Linux it checks namespaces, OverlayFS and
-   Landlock.
+   WSL distro and Linux binary; `cowbox win doctor --workspace ... --state-root
+   ...` checks the native NTFS editor path. On Linux it checks namespaces,
+   OverlayFS and Landlock.
 
 If the CLI is missing on Windows, tell the user to run `cowbox setup`; the
 installer does not install this skill automatically. The user must explicitly
@@ -55,6 +56,10 @@ harnesses.
    workspace edits through the upstream MCP file tools. Inspect the snapshot
    metadata after each call and roll back a bad step instead of piling on more
    edits. `cowbox_commit` only previews; never claim it wrote the host.
+8. **On Windows, distinguish editor saves from command execution.** Use
+   `cowbox win init` and open the returned managed workspace when the user
+   edits in Codex Desktop. Use the existing `cowbox run` path for commands. Do
+   not edit the original host directory while a native session is active.
 
 ## When to use
 
@@ -98,6 +103,25 @@ On Windows the project can stay at `E:\...`; `cowbox.exe` maps it into WSL. Do
 not ask the user to move the project into WSL. Run `cowbox path <path>` when a
 command needs an explicit WSL path.
 
+## Native Windows editor workflow
+
+```powershell
+cowbox win doctor --workspace E:\project\app --state-root D:\cowbox-state\app --json
+cowbox win init --workspace E:\project\app --state-root D:\cowbox-state\app --json
+# Open data.managed_workspace in Codex Desktop and save the edit.
+cowbox win checkpoint --session <id>
+cowbox win diff --session <id>
+cowbox win rollback <step> --session <id>
+cowbox win checkpoint --session <id>
+cowbox win commit --dry-run --session <id>
+cowbox win commit --session <id>   # human confirmation
+```
+
+`win doctor` reports `ntfs_materialized_copy`. The managed workspace is a
+normal NTFS directory; the preview protects write-back, not process or network
+activity. If `win commit` reports `WIN_COMMIT_RECOVERY_REQUIRED`, run
+`cowbox win commit --recover --session <id> --yes` and inspect conflicts.
+
 ## MCP snapshot workflow
 
 When the agent harness is configured with a cowbox MCP server, the upstream
@@ -128,9 +152,9 @@ assume a previous upstream process is still alive.
   installs explicitly; `--all` installs into every supported harness.
 - `cowbox init --agent` writes the project rule blocks for AGENTS.md,
   CLAUDE.md and Cursor.
-- Codex Desktop's built-in file editor is not intercepted in M3. Only commands
-  routed through cowbox are protected; the native Windows backend is a later
-  milestone.
+- Codex Desktop's built-in file editor is protected only when it is opened on
+  the managed workspace returned by `cowbox win init`/`rollback`. Editing the
+  original host directory directly bypasses the snapshot.
 
 ## JSON mode
 
@@ -157,6 +181,6 @@ cowbox stats --json
 This skill covers both the CLI and the optional stdio MCP snapshot proxy. The
 MCP control tools are read-only, pointer-only, or dry-run-only; the host write
 still requires a terminal commit and human approval. Codex Desktop built-in
-edits are outside this boundary until the native Windows backend lands.
-`--network off` isolates IP connectivity only and is not a packet-filtering
-sandbox.
+edits are covered only through the native `cowbox win` managed workspace;
+editing the original project bypasses the snapshot. `--network off` isolates IP
+connectivity only and is not a packet-filtering sandbox.

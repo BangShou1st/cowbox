@@ -14,6 +14,7 @@ mod render;
 mod setup;
 mod state;
 mod trace;
+mod win;
 #[cfg(windows)]
 mod windows_bridge;
 mod workspace;

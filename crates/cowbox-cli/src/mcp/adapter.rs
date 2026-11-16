@@ -598,6 +598,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn maps_workspace_command_paths_into_the_merged_mount() {
         assert_eq!(
             map_workspace_path(

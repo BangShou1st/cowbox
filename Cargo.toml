@@ -12,7 +12,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.6.0-m3"
+version = "0.7.0-m4"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -28,6 +28,7 @@ filetime = "0.2"
 fs2 = "0.4"
 hex = "0.4"
 humantime = "2"
+junction = "2"
 landlock = "0.4"
 predicates = "3"
 rustix = { version = "1.1", features = ["event", "fs", "mount", "process", "system", "thread", "time"] }
@@ -35,12 +36,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 similar = "2"
+sysinfo = { version = "0.36", default-features = false, features = ["disk"] }
 tempfile = "3"
 thiserror = "2"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 walkdir = "2"
+winapi-util = "0.1"
+windows-acl = "0.3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -197,6 +197,14 @@ jobs:
           cargo test -p cowbox-cli --bin cowbox
           cargo test -p cowbox-cli --test agent_integration --test cli
 
+      - name: Native Windows NTFS integration tests
+        env:
+          COWBOX_REQUIRE_WIN: "1"
+        run: cargo test -p cowbox-cli --test win_native -- --test-threads=1
+
+      - name: Clippy native Windows tests
+        run: cargo clippy -p cowbox-cli --test win_native -- -D warnings
+
       - name: Build release launcher
         run: cargo build -p cowbox-cli --release
 

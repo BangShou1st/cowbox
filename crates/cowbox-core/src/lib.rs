@@ -17,6 +17,8 @@ pub mod linux;
 pub mod manifest;
 #[cfg(target_os = "linux")]
 pub mod whiteout;
+#[cfg(target_os = "windows")]
+pub mod win;
 #[cfg(target_os = "linux")]
 mod xattr;
 

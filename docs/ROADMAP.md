@@ -99,7 +99,24 @@ Status: preview available in `0.6.0-m3`.
 
 ## M4: native platforms and evaluation
 
-- Native Windows 11 backend: ReFS block cloning + Job Objects.
+- Status: Windows 11 native snapshot-editing preview available in `0.7.0-m4`.
+  The preview deliberately uses an explicit NTFS materialized-copy store rather
+  than claiming NTFS block cloning.
+
+- [x] `cowbox win` commands for `doctor`, `init`, `checkpoint`, `log`, `diff`,
+  `rollback`, `commit`, `commit --recover`, and `discard`.
+- [x] Native managed workspace with a stable junction, content-addressed
+  objects, `cowbox-dag` checkpoints, and auto-rescue before rollback of
+  uncheckpointed edits.
+- [x] Journaled host write-back with same-directory replacement, a persisted
+  commit point, drift refusal, file-busy errors, idempotent recovery, and
+  mid-commit user-file preservation.
+- [x] Explicit support/refusal table for long paths, Unicode, case-only renames,
+  read-only files, ADS, hardlinks, reparse points, and explicit ACLs.
+- [x] Windows CI integration coverage plus 1k/10k-file, growth, cross-volume,
+  and real Codex Desktop acceptance.
+- [ ] ReFS block cloning and a block-cloned managed workspace.
+- [ ] Job Object process tracking and native Windows process isolation.
 - macOS backend: APFS `clonefile` + `sandbox-exec`/kqueue process tracking.
 - A reproducible eval harness for destructive refactor, dependency, migration,
   and prompt-injection tasks.

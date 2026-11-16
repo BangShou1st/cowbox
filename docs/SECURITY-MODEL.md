@@ -7,6 +7,11 @@ is designed for a developer running their own agent against their own project.
 It reduces the blast radius of mistakes and gives the developer a deterministic
 way to inspect and undo them.
 
+The M4 native Windows preview extends this position to editor saves: the editor
+is pointed at a managed NTFS copy, and only `cowbox win commit` writes the
+original project. It does not turn the Windows editor process into a sandboxed
+process.
+
 ## 2. Assets
 
 - The host workspace: source, untracked files, ignored files, lockfiles, local
@@ -17,7 +22,7 @@ way to inspect and undo them.
 
 ## 3. Trust boundaries
 
-| Boundary | Mechanism | M3 strength |
+| Boundary | Mechanism | Strength |
 | --- | --- | --- |
 | Workspace vs. rest of host | Landlock path rules | Strong for normal file access |
 | Sandbox process tree vs. host processes | PID namespace + PID 1 supervisor | Strong for ordinary children |
@@ -29,6 +34,9 @@ way to inspect and undo them.
 | MCP agent vs. upstream server | child sandbox process + stdio JSON-RPC proxy | Snapshot and process boundary; protocol content is not audited |
 | Kernel | none | Out of scope for M3 |
 | Host commit vs. partial writes | journal + backups + atomic renames | Strong for ordinary files |
+| Windows editor vs. host project | managed NTFS copy + journaled `win commit` | Strong for file write-back inside the managed workspace |
+| Windows process/network vs. host | none | Out of scope for the preview |
+| Windows ACL/hardlink/reparse fidelity | explicit refusal or preservation path | Fail-closed for unsupported cases |
 
 The MCP proxy starts a fresh upstream process inside a cowbox step for every
 `tools/call`. It does not keep a privileged or unsandboxed upstream alive.
@@ -152,7 +160,43 @@ a whole may still require manual inspection. The journal is fsynced, but the
 recovery contract covers process interruption only. It is not a power-loss,
 kernel-crash, or storage-failure guarantee.
 
-## 8. Known gaps
+### 7.1 Native Windows commit
+
+`cowbox win commit` binds the session id and target step to one journal. The
+session lock covers the host baseline scan, preview, backup, apply, and session
+write. The persisted `applied` phase is the commit point:
+
+- before `applied`, recovery restores the pre-commit host from journal backups;
+- at or after `applied`, recovery verifies the target and finalizes the session;
+- recovery is idempotent and may itself be interrupted;
+- a mid-commit host edit is copied to `conflicts/`, already-applied operations
+  are restored, and the user's file is left in place;
+- file-busy, drift, ACL, hardlink, and verification failures retain the journal
+  and backups.
+
+The preview is a file-integrity mechanism, not a power-loss guarantee. NTFS
+metadata operations and same-directory renames are used to keep readers from
+seeing torn file content, but the product does not claim ReFS block cloning,
+Job Object process control, or hostile-code containment.
+
+## 8. Native Windows boundary
+
+The managed workspace is a normal NTFS directory. Codex Desktop, another
+editor, or a shell can read and write it. cowbox protects the **write-back**:
+
+- `.git` is never imported, diffed, or committed.
+- Reparse points are refused during traversal.
+- Modified hardlinks and explicit ACL replacement are refused before write.
+- Read-only attributes and ADS are preserved for replaced files.
+- Host drift is detected against the base manifest; `--force` still backs up
+  the actual host bytes.
+
+Reads outside the managed directory, process behavior, network access,
+credentials, and edits made directly to the original host project are outside
+this boundary. Use the Linux/WSL2 engine when process and network isolation are
+required.
+
+## 9. Known gaps
 
 1. **Network access defaults to the host.** A command can connect out, bind host
    ports, or exfiltrate files it is allowed to read unless the caller selects
@@ -169,7 +213,7 @@ kernel-crash, or storage-failure guarantee.
 6. **No network audit counts.** Landlock denials are silent; `stats` reports
    blocked writes as not instrumented.
 
-## 9. Reporting
+## 10. Reporting
 
 Use GitHub private vulnerability reporting on this repository. Do not disclose
 details in a public issue. Include the cowbox version, kernel, filesystem,

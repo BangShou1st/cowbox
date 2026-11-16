@@ -4,6 +4,44 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.0-m4] - 2026-11-16
+
+### Added
+
+- `cowbox win` native Windows snapshot editing:
+  `doctor`, `init`, `checkpoint`, `log`, `diff`, `rollback`, `commit`,
+  `commit --recover`, and `discard`.
+- An explicit `ntfs_materialized_copy` storage mode with a managed workspace,
+  stable `current` junction, SHA-256 content-addressed objects, free-space
+  preflight, and a visible storage-mode report.
+- `cowbox-dag` checkpoints for a managed NTFS workspace. Deltas store only
+  changed paths and file objects; rollback materializes the target generation
+  and auto-saves uncheckpointed edits as a rescue step.
+- Journaled Windows host write-back with session/step binding, base-manifest
+  drift checks, same-directory replacement, a persisted `applied` commit point,
+  idempotent recovery, and deterministic fault injection for interruption
+  tests.
+- Native Windows support/refusal handling for Unicode, long paths, case-only
+  renames, read-only files, ADS preservation, hardlinks, reparse points, and
+  explicit ACLs.
+- Windows CI `win_native` integration tests, a 1k/10k-file acceptance harness,
+  and a cross-volume E: project / D: state-root acceptance path.
+
+### Changed
+
+- The Windows ZIP remains a single `cowbox.exe`: `win` runs natively while the
+  existing run/diff/rollback/commit/MCP commands continue to delegate to WSL2.
+- Version bumped to `0.7.0-m4`.
+
+### Known limitations
+
+- The native Windows preview materializes NTFS files; it does not use NTFS
+  extent cloning or ReFS block cloning.
+- It protects files inside the managed workspace and the journaled write-back,
+  not processes, network access, or reads outside that directory.
+- Symlinks/junctions and explicit ACL replacement are refused. Hardlinked files
+  may be imported but cannot be modified through cowbox.
+
 ## [0.6.0-m3] - 2026-11-16
 
 ### Added

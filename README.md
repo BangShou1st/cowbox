@@ -20,11 +20,13 @@
 </div>
 
 > [!IMPORTANT]
-> cowbox is an **M3 agent snapshot preview**. The engine targets Linux and WSL2;
-> Windows ships a native launcher that delegates into WSL. `mcp-proxy` wraps a
-> stdio MCP server so each tool call becomes an inspectable, reversible cowbox
-> step. A native Windows file-edit backend and macOS support are later
-> milestones. See [docs/ROADMAP.md](docs/ROADMAP.md) for the staged plan.
+> cowbox is an **M4 native Windows snapshot-editing preview**. The Linux/WSL2
+> engine and MCP proxy are unchanged; `cowbox win` adds an NTFS
+> materialized-copy session for editors such as Codex Desktop, with checkpoint,
+> diff, rollback, and journaled human-approved write-back. It is a file
+> protection boundary, not a process or network sandbox. macOS support and a
+> ReFS block-cloning backend are later milestones. See
+> [docs/ROADMAP.md](docs/ROADMAP.md) and [docs/WINDOWS.md](docs/WINDOWS.md).
 
 ## Why cowbox
 
@@ -63,6 +65,8 @@ cowbox stats                 # inspect logical steps, mount layers, disk use
 cowbox sessions              # list active and finalized sessions across projects
 cowbox gc --dry-run          # preview old session state that can be removed
 cowbox mcp-proxy -- <server> # expose a stdio MCP server behind cowbox snapshots
+cowbox win init ...          # native Windows managed workspace for the editor
+cowbox win checkpoint|diff|rollback|commit
 ```
 
 All commands support `--json`. `run` also supports `--trace-chrome` for a
@@ -157,6 +161,30 @@ cowbox run -- <command>
 `init --agent` writes `.cowbox.toml` plus the AGENTS.md, CLAUDE.md and Cursor
 rule blocks. The default trigger mode is `ask`; inspect it with
 `cowbox policy --json`.
+
+### Native Windows snapshot editing
+
+`cowbox win` runs on Windows without WSL. It imports the project into an
+explicit NTFS materialized workspace, then protects editor saves through the
+same DAG and a journaled write-back:
+
+```powershell
+cowbox win doctor --workspace E:\project\app --state-root D:\cowbox-state\app --json
+cowbox win init --workspace E:\project\app --state-root D:\cowbox-state\app --json
+# Open data.managed_workspace in Codex Desktop, then save edits.
+cowbox win checkpoint --session <id>
+cowbox win diff --session <id>
+cowbox win rollback <step> --session <id>
+cowbox win commit --dry-run --session <id>
+cowbox win commit --session <id>
+```
+
+The initial import is estimated at about twice the source bytes; checkpoints
+store only changed file objects and a small DAG delta. Hardlinks are refused on
+modification, reparse points are refused, read-only files and ADS are
+preserved, and explicit ACLs are refused before replacement. See
+[docs/WINDOWS.md](docs/WINDOWS.md) for the full support table and recovery
+semantics.
 
 ## Quick start (WSL2)
 
@@ -401,6 +429,11 @@ python3 scripts/offline_workflow.py \
   not a power-loss or storage-failure guarantee.
 - Only `user.*` xattrs are preserved. Non-user xattr namespaces are kernel or
   security-managed and are left untouched.
+- Native `cowbox win` protects edits inside its managed workspace and the
+  original project only through `win commit`. It does not isolate processes,
+  network access, or reads outside that directory. Explicit ACLs, hardlink
+  modifications, and reparse points are refused before write-back rather than
+  silently degraded.
 - Configured host caches are mounted read-only and only their data directories
   are exposed. Session writes copy up into the session cache.
 - `.git` is never committed, even with `--include-excluded`. Device nodes,
@@ -414,6 +447,14 @@ See [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md) for the full threat model.
 
 We only publish numbers that were measured on a real machine. The harness and
 methodology live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+The `0.7.0-m4` native Windows preview measured a 10,000-file NTFS fixture at
+58.87 s initial import, 0.91 s checkpoint, 0.90 s diff, 8.34 s rollback, and
+3.06 s for a three-file commit. One changed small file added 689 bytes; ten
+small checkpoints grew state by 737-743 bytes each; `win discard` released
+52,817 bytes. Cross-volume `E:` project to `D:` state was 28.8/31.8/34.8 ms
+for init/checkpoint/commit. These are materialized-copy numbers, not
+OverlayFS latency.
 
 The final M2 offline-execution round compared the merge baseline `29af7e7` with
 the network-policy/offline candidate `fb4dad0` on WSL2 ext4. Each scenario used
@@ -453,7 +494,7 @@ instrumented yet.
 | **M1.5** | Windows launcher, `setup`, multi-harness skill installer, project rules and policy | Preview available |
 | **M2** | Long sessions, network policy, offline diagnostics/workflows, read-only host caches, 200k-file benchmarks | Preview available |
 | **M3** | MCP snapshot proxy, synthetic diff/rollback/commit tools, real-harness workflow | Preview available |
-| **M4** | Native Windows ReFS + Job Object backend, macOS backend, eval suite and public leaderboard | Planned |
+| **M4** | Native Windows NTFS snapshot editing (preview), ReFS + Job Object backend, macOS backend, eval suite and public leaderboard | Windows preview available |
 
 M1 explicitly excludes MCP, native Windows, macOS, network isolation, and
 multi-agent racing. M2 adds opt-in network-namespace isolation without claiming
