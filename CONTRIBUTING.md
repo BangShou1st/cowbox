@@ -7,7 +7,7 @@ agree to follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## Development environment
 
-M1 is developed and tested on Linux. On Windows, use WSL2 with Ubuntu 24.04 and
+M2 is developed and tested on Linux. On Windows, use WSL2 with Ubuntu 24.04 and
 keep build artifacts on the Linux filesystem:
 
 ```bash
@@ -33,6 +33,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 COWBOX_REQUIRE_SANDBOX=1 cargo test -p cowbox-cli --test adversarial_suite -- --test-threads=1
 bash scripts/smoke.sh
+cowbox doctor --check-run --network off --json
+python3 scripts/offline_workflow.py --binary "$CARGO_TARGET_DIR/debug/cowbox"
 ```
 
 Benchmarks:
@@ -91,9 +93,10 @@ Before requesting review:
 
 ## Scope discipline
 
-M1 does not accept MCP proxy, native Windows, macOS, network isolation, or
-multi-agent race features. Those belong to later milestones. Small, focused
-fixes that make M1's existing behavior more deterministic are always welcome.
+M2 does not accept MCP proxy, native Windows, macOS, packet-filtering network
+policy, or multi-agent race features. Those belong to later milestones. Small,
+focused fixes that make M2's existing behavior more deterministic are always
+welcome.
 
 ## Security
 

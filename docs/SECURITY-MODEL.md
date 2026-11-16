@@ -17,15 +17,16 @@ way to inspect and undo them.
 
 ## 3. Trust boundaries
 
-| Boundary | Mechanism | M1 strength |
+| Boundary | Mechanism | M2 strength |
 | --- | --- | --- |
 | Workspace vs. rest of host | Landlock path rules | Strong for normal file access |
 | Sandbox process tree vs. host processes | PID namespace + PID 1 supervisor | Strong for ordinary children |
 | Command filesystem view vs. host mutations | OverlayFS mount namespace | Strong while the host is not edited |
 | Command environment vs. host environment | env sanitization + redirected HOME/TMPDIR/cache | Best effort; explicit allowlists matter |
 | Host cache data vs. session cache writes | read-only OverlayFS lower + session upper | Strong for configured data directories |
-| Network | none | **Not isolated** |
-| Kernel | none | Out of scope for M1 |
+| Network IP connectivity | network namespace when policy is `off` | Isolated for IPv4/IPv6 TCP/UDP; `host` remains unrestricted |
+| Filesystem Unix sockets | Landlock path rules | IPC boundary remains visible when its path is allowed |
+| Kernel | none | Out of scope for M2 |
 | Host commit vs. partial writes | journal + backups + atomic renames | Strong for ordinary files |
 
 ## 4. Landlock policy
@@ -51,6 +52,8 @@ without the fence.
 
 - New user namespace with the host uid/gid mapped to namespace root.
 - New mount namespace so the overlay and private procfs are private.
+- For `--network off`, a new network namespace created after UID/GID mapping
+  and OverlayFS setup. It has no host interfaces and leaves loopback down.
 - New PID namespace; the supervisor is PID 1 and reaps every remaining child
   before the step is frozen.
 - The command's `PATH` is rebuilt from Linux directories; Windows entries are
@@ -78,6 +81,22 @@ remain outside the redirected session home.
 The host cache is a trusted local data source. A malicious cache entry can
 influence the tool just as a normal host cache could; cowbox verifies package
 hashes only when the underlying tool is asked to do so.
+
+## 6.1 Network policy
+
+The default policy is `host`. The CLI override precedes project configuration,
+which precedes the default. `off` removes IP connectivity by entering a new
+Linux network namespace and does not fall back to the host namespace on error.
+
+The policy isolates IP traffic, not all IPC. A filesystem-backed Unix-domain
+socket remains reachable when its path is readable or writable under the
+Landlock policy. This is intentional: build daemons and local tooling often use
+filesystem sockets. Use narrower Landlock paths when that IPC channel must be
+blocked.
+
+The policy is not a firewall. It cannot allow a specific destination, filter
+packets, or provide per-protocol rules. IPv6 and IPv4 are both unavailable in
+the private namespace because only a down loopback interface exists.
 
 ## 7. Commit safety
 
@@ -127,8 +146,10 @@ kernel-crash, or storage-failure guarantee.
 
 ## 8. Known gaps
 
-1. **Network access is unrestricted.** A command can connect out, bind host
-   ports, or exfiltrate files it is allowed to read. M2 adds a network policy.
+1. **Network access defaults to the host.** A command can connect out, bind host
+   ports, or exfiltrate files it is allowed to read unless the caller selects
+   `run --network off`. The `off` policy isolates IP connectivity but does not
+   filter destinations or isolate filesystem-backed Unix sockets.
 2. **Live lowerdir.** External host edits are visible in the sandbox and are
    detected only at commit (metadata-level).
 3. **Kernel attack surface.** User namespaces and OverlayFS are kernel code; a

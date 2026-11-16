@@ -6,7 +6,7 @@ cowbox makes local workspace mutations by an AI coding agent cheap to inspect
 and cheap to reverse. It does this without a VM, without a container image, and
 without replacing the developer's toolchain.
 
-The M1 design has four properties:
+The M2 design has five properties:
 
 1. **Millisecond setup.** The workspace is a read-only lowerdir; each step adds
    a writable upperdir on ext4.
@@ -16,10 +16,12 @@ The M1 design has four properties:
    background processes are reaped in a PID namespace.
 4. **Auditable commit.** The host is changed only through a journaled,
    drift-checked, topologically ordered commit.
+5. **Explicit network policy.** Steps default to the host network; `off`
+   removes IP connectivity in a private network namespace without a fallback.
 
-## 2. Non-goals for M1
+## 2. Non-goals for M2
 
-- Network isolation or a network namespace.
+- Selective destination filtering or packet-level network policy.
 - A native Windows or macOS backend.
 - MCP proxying or agent-specific protocol integration.
 - Multi-agent parallel racing.
@@ -104,7 +106,7 @@ It must be outside the workspace and on an xattr-capable Linux filesystem.
 ```
 
 A session is `Active`, `Committed`, or `Discarded`. Only one active session is
-allowed per workspace in M1. After a successful commit the active pointer is
+allowed per workspace in M2. After a successful commit the active pointer is
 cleared; the next `run` creates a new session whose base is the updated host.
 
 ## 5. Run lifecycle
@@ -122,6 +124,9 @@ sequenceDiagram
     CLI->>Helper: go signal
     Helper->>Helper: unshare(CLONE_NEWNS)
     Helper->>Helper: mount overlayfs (userxattr)
+    opt network policy is off
+        Helper->>Helper: unshare(CLONE_NEWNET)
+    end
     Helper->>Helper: unshare(CLONE_NEWPID)
     Helper->>Sup: spawn __supervisor (PID 1)
     Sup->>Sup: mount private procfs
@@ -164,6 +169,42 @@ userxattr
 The lower layers are ordered topmost-first. The base workspace remains the live
 host directory. That is why the host must be treated as read-only while a
 session is active.
+
+### Network namespace policy
+
+The resolved policy is `host` unless `cowbox run --network off` is present or
+`.cowbox.toml` contains `[sandbox] network = "off"`. The precedence is CLI,
+project configuration, then `host`.
+
+For `off`, the helper calls `unshare(CLONE_NEWNET)` after the UID/GID map
+handshake and after OverlayFS is mounted. It runs before `CLONE_NEWPID` and
+before the supervisor can spawn the user command. The new namespace contains no
+host interfaces and leaves loopback down. A failure returns
+`NETWORK_NAMESPACE_FAILED` with exit code 125; the CLI removes the incomplete
+step and never attempts a host-network fallback.
+
+This policy isolates IP connectivity for IPv4 and IPv6 TCP/UDP traffic. It is
+not a firewall, cannot allowlist destinations, and does not isolate
+filesystem-backed Unix-domain sockets. A Unix socket remains an IPC boundary,
+subject to the Landlock path policy.
+
+The CLI stores a policy snapshot in `session.json` under a step-keyed
+`run_policies` map. `run --json` returns the effective snapshot in
+`data.policy`; `stats --json` returns the snapshot at the current DAG head. The
+object has these fields:
+
+| Field | Values |
+| --- | --- |
+| `recorded` | `true`; older sessions report `false` |
+| `network` | `host`, `off`, or `unknown` for a legacy session |
+| `network_source` | `cli`, `project`, `default`, or `legacy` |
+| `isolated_caches` | Boolean cache-isolation setting |
+| `host_caches` | Configured host cache tools in use |
+
+The map is keyed by logical step id. Rollback changes the current snapshot
+without rewriting history, and a new branch records its own policy on the next
+step. The field defaults to an empty map when deserializing older sessions, so
+the session schema remains version 1.
 
 ### Layer compaction
 
@@ -340,17 +381,27 @@ preserve the conflicting content before retrying recovery.
 probes (namespace, overlay, `userxattr`, Landlock ABI, state filesystem, disk
 space) and reports configured Cargo/npm/pip host cache data sources. The
 whiteout kind is confirmed by the first real run, and latency is measured by
-`scripts/bench.sh`. `stats` reports logical step count, physical mount layers,
-compacted storage, rollback count, reaped orphans, incremental disk use, and
-whether network isolation is active.
+`scripts/bench.sh`.
+
+`doctor --check-run [--network off]` additionally creates a temporary ext4
+fixture and executes the real CLI, helper, mapping, overlay, network namespace,
+Landlock, and user-command path. `run_check.stages` distinguishes state-disk,
+user-namespace, network-namespace, OverlayFS, and Landlock failures, and
+`command_started` proves whether a setup failure prevented user code from
+running. The ordinary static doctor JSON fields remain unchanged.
+
+`stats` reports logical step count, physical mount layers, compacted storage,
+rollback count, reaped orphans, incremental disk use, the current policy
+snapshot, and whether network isolation is active.
 
 cowbox does **not** count blocked writes: Landlock denials are silent. The field is
 reported as not instrumented rather than invented.
 
 ## 9. WSL2 bridge notes
 
-M1 runs as a Linux binary inside WSL2. The Windows GUI integration (`cowbox.exe`
-wrapper over `wsl.exe`) is M3. For M1:
+The engine runs as a Linux binary inside WSL2. The native Windows launcher
+forwards commands, including all `doctor` arguments, exit codes, and output
+through `wsl.exe`:
 
 - Source may be on `/mnt/e`; upper and work layers must be on ext4.
 - `/mnt/e` works as a read-only lowerdir in testing, but 9p has different
@@ -362,9 +413,10 @@ wrapper over `wsl.exe`) is M3. For M1:
 
 | Failure | Behavior |
 | --- | --- |
-| Kernel lacks user namespaces | `IsolationFailed`; command does not run |
-| OverlayFS mount fails | `CowUnsupported`/`IsolationFailed`; no copy fallback |
-| Landlock unavailable | `Landlock` error; command does not run |
+| Kernel lacks user namespaces | `USER_NAMESPACE_FAILED`; command does not run |
+| Network namespace creation fails | `NETWORK_NAMESPACE_FAILED`; command does not run |
+| OverlayFS mount fails | `OVERLAYFS_FAILED`; no copy fallback |
+| Landlock unavailable | `LANDLOCK_FAILED`; command does not run |
 | State dir on 9p/without xattr | `CowUnsupported` with a path hint |
 | Command times out | kill namespace, exit 124, record a step |
 | Host file changed during session | commit conflict; `--force` still backs up |

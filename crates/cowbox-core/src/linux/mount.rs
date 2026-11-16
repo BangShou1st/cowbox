@@ -27,7 +27,7 @@ pub fn mount_overlay(spec: &RunSpec) -> Result<()> {
         Some(data.as_c_str()),
     )
     .map_err(|error| {
-        CoreError::IsolationFailed(format!(
+        CoreError::OverlayFilesystem(format!(
             "mounting unprivileged OverlayFS at {} failed: {error}",
             spec.merged_dir.display()
         ))
@@ -99,7 +99,7 @@ pub fn mount_cache_overlays(spec: &RunSpec) -> Result<()> {
             Some(data.as_c_str()),
         )
         .map_err(|error| {
-            CoreError::IsolationFailed(format!(
+            CoreError::OverlayFilesystem(format!(
                 "mounting {} host cache {} at {} failed: {error}",
                 cache.tool,
                 cache.source.display(),
@@ -112,7 +112,7 @@ pub fn mount_cache_overlays(spec: &RunSpec) -> Result<()> {
 
 pub fn unmount_overlay(spec: &RunSpec) -> Result<()> {
     unmount(&spec.merged_dir, UnmountFlags::DETACH).map_err(|error| {
-        CoreError::IsolationFailed(format!(
+        CoreError::OverlayFilesystem(format!(
             "unmounting {} failed: {error}",
             spec.merged_dir.display()
         ))

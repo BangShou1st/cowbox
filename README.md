@@ -22,8 +22,9 @@
 > [!IMPORTANT]
 > cowbox is an **M2 performance preview**. The engine targets Linux and WSL2;
 > Windows ships a native launcher that delegates into WSL. MCP proxying, a
-> native Windows file-edit backend, macOS support, and network isolation are
-> later milestones. See [docs/ROADMAP.md](docs/ROADMAP.md) for the staged plan.
+> native Windows file-edit backend, and macOS support are later milestones.
+> `run --network off` provides opt-in Linux network-namespace isolation for IP
+> traffic. See [docs/ROADMAP.md](docs/ROADMAP.md) for the staged plan.
 
 ## Why cowbox
 
@@ -46,7 +47,9 @@ your real project, with a cheap undo button.
 
 ```bash
 cowbox run -- <command>      # run in a CoW view; every invocation is a step
+cowbox run --network off ... # also isolate IP connectivity in a network namespace
 cowbox demo                  # verify rollback end to end in an isolated fixture
+cowbox demo --offline        # run the same real execution under network policy off
 cowbox diff                  # inspect net changes and sandbox side effects
 cowbox log                   # see the step DAG, including branches
 cowbox rollback <step>       # move the head pointer; no host writes
@@ -55,6 +58,7 @@ cowbox commit                # atomically apply the net changes to the host
 cowbox commit --recover      # reconcile an interrupted commit (restore or finish)
 cowbox discard               # throw the sandbox state away
 cowbox doctor                # check kernel, OverlayFS, xattr, Landlock
+cowbox doctor --check-run --network off # exercise the real startup chain
 cowbox stats                 # inspect logical steps, mount layers, disk use
 cowbox sessions              # list active and finalized sessions across projects
 cowbox gc --dry-run          # preview old session state that can be removed
@@ -105,6 +109,9 @@ Chrome Trace JSON of namespace, mount, diff, and commit spans.
 - Landlock denies writes outside the workspace and the session's private
   home/tmp/cache directories. A PID namespace reaps background children when a
   step ends.
+- With `--network off`, the helper unshares a Linux network namespace after the
+  UID/GID mapping and after OverlayFS setup, but before the user command starts.
+  There is no fallback to the host namespace if that step fails.
 
 For the full call sequence, whiteout rules, and commit ordering, see
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -118,6 +125,7 @@ terminal:
 .\cowbox.exe setup
 cowbox doctor
 cowbox demo
+cowbox demo --offline
 cowbox install-skill --list
 cowbox install-skill --harness codex
 ```
@@ -129,7 +137,8 @@ can stay on `E:\...`; the launcher maps it to `/mnt/e/...` inside WSL.
 `cowbox demo` creates an isolated fixture under `/tmp`, performs a destructive
 command, previews the commit, rolls back, and verifies that the fixture files
 are restored. It never touches the current project. Use `--keep` to inspect the
-fixture or `--json` for machine-readable output.
+fixture or `--json` for machine-readable output. `demo --offline` performs the
+real execution, diff, and rollback with network policy `off`.
 
 In a project:
 
@@ -212,6 +221,43 @@ layers uncompressed. `cowbox stats` reports both logical steps and the physical
 mount count, plus compacted-layer storage. A compaction cache is reused only
 when its recorded source list is an exact prefix of the current branch.
 
+### Network policy
+
+`cowbox run --network host|off` selects the network policy for a step. The
+precedence is CLI, then project configuration, then `host`:
+
+```toml
+[sandbox]
+network = "off"
+```
+
+`off` uses a private Linux network namespace. The namespace has no host
+interfaces and its loopback interface remains down. IPv4, IPv6, TCP, and UDP
+connections to host or external addresses therefore fail. This is IP
+connectivity isolation, not a firewall or a seccomp network policy.
+
+Filesystem-backed Unix-domain sockets are an IPC boundary: a path that the
+Landlock policy allows remains reachable across the network namespace. Use
+Landlock path rules when an agent must not reach a particular Unix socket.
+
+The effective policy is recorded per logical step. `run --json` reports it in
+`data.policy`, and `stats --json` reports the policy for the current snapshot.
+Older sessions without a record remain readable and report
+`"recorded": false` with network `"unknown"`.
+
+```bash
+cowbox run --json --network off -- python3 ./offline_job.py
+cowbox stats --json
+cowbox doctor --check-run --network off --json
+```
+
+`doctor --check-run` keeps the static capability report and also runs the real
+helper, namespace, OverlayFS, state-disk, Landlock, and user-command path in a
+temporary fixture. Its `run_check.stages` object distinguishes user-namespace,
+network-namespace, OverlayFS, state-disk, and Landlock failures. A network
+namespace setup failure returns `NETWORK_NAMESPACE_FAILED` with exit code 125
+and reports `command_started: false`.
+
 ### Host cache reuse
 
 Cargo, npm, and pip can explicitly reuse a host cache as a read-only data
@@ -237,6 +283,28 @@ through `PIP_FIND_LINKS`, so pinned, hashed requirements can install with
 `--no-index` without network access. Other downloads still use the normal index
 and land in the session cache.
 
+### Offline workflow
+
+`scripts/offline_workflow.py` generates only local fixtures. It verifies:
+
+- a cold Cargo directory-source miss and a host-cache hit through a local
+  vendored registry;
+- a cold npm `ENOTCACHED` miss and a host `_cacache` hit from a local tarball
+  served only while seeding;
+- a cold pip miss and a host wheelhouse hit through `PIP_FIND_LINKS`;
+- session-local cache writes persist between steps while host cache hashes stay
+  unchanged;
+- the real diff contains the workspace outputs and rollback restores the host
+  fixture.
+
+All commands run with `--network off`; no public package registry is used:
+
+```bash
+python3 scripts/offline_workflow.py \
+  --binary "$COWBOX_BIN" \
+  --json-output "$HOME/cowbox-bench-results/offline.json"
+```
+
 ## Safety model
 
 - cowbox uses **Landlock ABI 3** for path-based read/write fencing and a
@@ -245,9 +313,12 @@ and land in the session cache.
   lowerdir is the live workspace, so external edits are detected at commit time
   through a base manifest; `cowbox commit` refuses by default and `--force`
   still takes a backup.
-- cowbox does **not** isolate the network. A process inside the sandbox can bind
-  host ports and make network connections. Network policy is planned for M2.
-- M1 is a guard against **accidental damage and agent mistakes**, not a
+- The default network policy is `host`: a process can bind host ports and make
+  network connections. `run --network off` removes IP connectivity by placing
+  the command in a fresh Linux network namespace. The namespace is not a
+  firewall, cannot filter selected destinations, and does not isolate
+  filesystem-backed Unix sockets.
+- M2 is a guard against **accidental damage and agent mistakes**, not a
   hardened sandbox for hostile code. Kernel exploits and deliberately malicious
   binaries are out of scope.
 - `cowbox commit` asks for confirmation in a terminal. Non-interactive callers
@@ -302,12 +373,14 @@ instrumented yet.
 | --- | --- | --- |
 | **M1** | Linux/WSL2 CLI, snapshot DAG, OverlayFS, Landlock, commit journal, tests, benchmarks | Preview available |
 | **M1.5** | Windows launcher, `setup`, multi-harness skill installer, project rules and policy | Preview available |
-| **M2** | Long sessions, read-only host caches, performance work, 200k-file benchmarks | Preview available; network policy remains planned |
+| **M2** | Long sessions, network policy, offline diagnostics/workflows, read-only host caches, 200k-file benchmarks | Preview available |
 | **M3** | MCP proxy with `cowbox_diff` / `cowbox_rollback` / `cowbox_commit` meta-tools | Planned |
 | **M4** | Native Windows ReFS + Job Object backend, macOS backend, eval suite and public leaderboard | Planned |
 
 M1 explicitly excludes MCP, native Windows, macOS, network isolation, and
-multi-agent racing. The [roadmap](docs/ROADMAP.md) keeps the boundaries honest.
+multi-agent racing. M2 adds opt-in network-namespace isolation without claiming
+packet filtering or hostile-code isolation. The
+[roadmap](docs/ROADMAP.md) keeps the boundaries honest.
 
 ## Contributing
 

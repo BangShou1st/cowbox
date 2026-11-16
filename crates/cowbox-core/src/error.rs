@@ -7,6 +7,12 @@ pub enum CoreError {
     CowUnsupported { path: PathBuf, reason: String },
     #[error("sandbox isolation failed: {0}")]
     IsolationFailed(String),
+    #[error("user namespace setup failed: {0}")]
+    UserNamespace(String),
+    #[error("network namespace setup failed: {0}")]
+    NetworkNamespace(String),
+    #[error("OverlayFS setup failed: {0}")]
+    OverlayFilesystem(String),
     #[error("Landlock setup failed: {0}")]
     Landlock(String),
     #[error("session state corrupted at step {step}: {reason}")]
@@ -25,6 +31,27 @@ pub enum CoreError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+}
+
+impl CoreError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::CowUnsupported { .. } => "COW_UNSUPPORTED",
+            Self::IsolationFailed(_) => "ISOLATION_FAILED",
+            Self::UserNamespace(_) => "USER_NAMESPACE_FAILED",
+            Self::NetworkNamespace(_) => "NETWORK_NAMESPACE_FAILED",
+            Self::OverlayFilesystem(_) => "OVERLAYFS_FAILED",
+            Self::Landlock(_) => "LANDLOCK_FAILED",
+            Self::StateCorrupted { .. } => "STATE_CORRUPTED",
+            Self::CommitConflict(_) => "COMMIT_CONFLICT",
+            Self::CommitFailed(_) => "COMMIT_FAILED",
+            Self::CommitRecoveryRequired(_) => "COMMIT_RECOVERY_REQUIRED",
+            Self::Timeout(_) => "TIMEOUT",
+            Self::Config(_) => "CONFIG_ERROR",
+            Self::Io(_) => "IO_ERROR",
+            Self::Json(_) => "JSON_ERROR",
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;

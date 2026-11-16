@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::NetworkMode;
+
 pub const DEFAULT_EXCLUDES: &[&str] = &[
     ".git",
     ".cowbox",
@@ -40,6 +42,7 @@ pub struct HostCacheSource {
 pub struct ExecPolicy {
     pub extra_ro_paths: Vec<PathBuf>,
     pub extra_rw_paths: Vec<PathBuf>,
+    pub network: NetworkMode,
     pub isolate_caches: bool,
     pub timeout: Option<Duration>,
     pub clean_env: bool,
@@ -55,6 +58,7 @@ impl Default for ExecPolicy {
         Self {
             extra_ro_paths: Vec::new(),
             extra_rw_paths: Vec::new(),
+            network: NetworkMode::Host,
             isolate_caches: true,
             timeout: Some(Duration::from_secs(30 * 60)),
             clean_env: false,

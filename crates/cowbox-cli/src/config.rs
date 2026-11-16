@@ -2,13 +2,41 @@ use crate::error::{CliError, CliResult};
 use crate::workspace::resolve_path;
 use clap::ValueEnum;
 use cowbox_core::policy::DEFAULT_EXCLUDES;
-use cowbox_core::{CommitOptions, DiffOptions, ExecPolicy, HostCacheKind, HostCacheSource};
+use cowbox_core::{
+    CommitOptions, DiffOptions, ExecPolicy, HostCacheKind, HostCacheSource, NetworkMode,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const CONFIG_FILE: &str = ".cowbox.toml";
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicySource {
+    Cli,
+    Project,
+    Default,
+    Legacy,
+}
+
+impl PolicySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cli => "cli",
+            Self::Project => "project",
+            Self::Default => "default",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedNetworkPolicy {
+    pub mode: NetworkMode,
+    pub source: PolicySource,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,6 +97,8 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub clean_env: bool,
     #[serde(default)]
+    pub network: Option<NetworkMode>,
+    #[serde(default)]
     pub extra_ro_paths: Vec<PathBuf>,
     #[serde(default)]
     pub extra_rw_paths: Vec<PathBuf>,
@@ -119,6 +149,7 @@ pub struct CommitConfig {
 
 #[derive(Debug, Default)]
 pub struct RunPolicyOverrides {
+    pub network: Option<NetworkMode>,
     pub allow_read: Vec<PathBuf>,
     pub allow_write: Vec<PathBuf>,
     pub env: Vec<String>,
@@ -144,6 +175,7 @@ impl Default for SandboxConfig {
             timeout: default_timeout(),
             isolate_caches: true,
             clean_env: false,
+            network: None,
             extra_ro_paths: Vec::new(),
             extra_rw_paths: Vec::new(),
             host_caches: HostCachesConfig::default(),
@@ -201,6 +233,25 @@ impl Config {
         Ok(())
     }
 
+    pub fn network_policy(&self, cli: Option<NetworkMode>) -> ResolvedNetworkPolicy {
+        if let Some(mode) = cli {
+            return ResolvedNetworkPolicy {
+                mode,
+                source: PolicySource::Cli,
+            };
+        }
+        if let Some(mode) = self.sandbox.network {
+            return ResolvedNetworkPolicy {
+                mode,
+                source: PolicySource::Project,
+            };
+        }
+        ResolvedNetworkPolicy {
+            mode: NetworkMode::Host,
+            source: PolicySource::Default,
+        }
+    }
+
     pub fn write_template(workspace: &Path, force: bool) -> CliResult<PathBuf> {
         let path = workspace.join(CONFIG_FILE);
         if path.exists() && !force {
@@ -218,6 +269,7 @@ impl Config {
 timeout = "30m"
 isolate_caches = true
 clean_env = false
+network = "host"
 extra_ro_paths = []
 extra_rw_paths = []
 
@@ -306,6 +358,7 @@ max_files_without_prompt = 5
         Ok(ExecPolicy {
             extra_ro_paths,
             extra_rw_paths,
+            network: self.network_policy(overrides.network).mode,
             isolate_caches: self.sandbox.isolate_caches,
             timeout,
             clean_env: overrides.clean_env || self.sandbox.clean_env,
@@ -341,7 +394,6 @@ max_files_without_prompt = 5
         }
     }
 
-    #[cfg(not(windows))]
     pub fn host_cache_sources(&self, workspace: &Path) -> CliResult<Vec<HostCacheSource>> {
         self.sandbox.host_caches.sources(workspace)
     }
@@ -488,6 +540,23 @@ pip = false
             config.sandbox.host_caches.pip,
             HostCacheSetting::Enabled(false)
         );
+    }
+
+    #[test]
+    fn network_policy_precedence_is_cli_then_project_then_host() {
+        let mut config = Config::default();
+        let fallback = config.network_policy(None);
+        assert_eq!(fallback.mode, NetworkMode::Host);
+        assert_eq!(fallback.source, PolicySource::Default);
+
+        config.sandbox.network = Some(NetworkMode::Off);
+        let project = config.network_policy(None);
+        assert_eq!(project.mode, NetworkMode::Off);
+        assert_eq!(project.source, PolicySource::Project);
+
+        let cli = config.network_policy(Some(NetworkMode::Host));
+        assert_eq!(cli.mode, NetworkMode::Host);
+        assert_eq!(cli.source, PolicySource::Cli);
     }
 
     #[cfg(not(windows))]

@@ -21,8 +21,9 @@
 
 > [!IMPORTANT]
 > cowbox 目前是 **M2 性能预览版**。引擎运行在 Linux/WSL2，Windows 提供原生启动器
-> 并委托到 WSL。MCP 代理、Windows 原生文件编辑后端、macOS 和网络隔离属于后续
-> 里程碑。分阶段计划见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+> 并委托到 WSL。MCP 代理、Windows 原生文件编辑后端和 macOS 属于后续里程碑。
+> `run --network off` 已提供可选的 Linux 网络命名空间 IP 隔离。分阶段计划见
+> [docs/ROADMAP.md](docs/ROADMAP.md)。
 
 ## 为什么需要 cowbox
 
@@ -43,7 +44,9 @@ cowbox 不是容器替代品，而是你正在编辑的 workspace 的**本地安
 
 ```bash
 cowbox run -- <command>      # 在 CoW 视图中执行命令；每次执行生成一个 step
+cowbox run --network off ... # 同时在独立网络命名空间中隔离 IP 连通性
 cowbox demo                  # 在隔离 fixture 中端到端验证回滚
+cowbox demo --offline        # 用 network=off 真实执行、diff 并回滚
 cowbox diff                  # 查看净变更与沙盒副作用
 cowbox log                   # 查看 step DAG（含分支）
 cowbox rollback <step>       # 只移动 head 指针，不写宿主机
@@ -52,6 +55,7 @@ cowbox commit                # 把净变更原子写回宿主机
 cowbox commit --recover      # 处理中断 commit：恢复宿主机或完成会话收尾
 cowbox discard               # 丢弃沙盒状态
 cowbox doctor                # 检查内核、OverlayFS、xattr、Landlock
+cowbox doctor --check-run --network off # 走真实启动链路做主动诊断
 cowbox stats                 # 查看逻辑步数、实际挂载层、磁盘占用
 cowbox sessions              # 列出所有项目的 active 与 finalized session
 cowbox gc --dry-run          # 预览可清理的旧 session 状态
@@ -95,6 +99,8 @@ diff、commit 的 Chrome Trace JSON。
   在此之后中断，它保留已提交内容并完成会话收尾。
 - Landlock 拒绝 workspace 与 session 私有 home/tmp/cache 之外的写入；PID namespace
   在步骤结束时回收后台子进程。
+- `--network off` 在 UID/GID 映射完成、OverlayFS 建好之后、用户命令启动之前创建
+  Linux 网络命名空间；创建失败直接报错，不会回退到 host namespace。
 
 完整调用链、whiteout 规则与 commit 顺序见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
@@ -106,6 +112,7 @@ diff、commit 的 Chrome Trace JSON。
 .\cowbox.exe setup
 cowbox doctor
 cowbox demo
+cowbox demo --offline
 cowbox install-skill --list
 cowbox install-skill --harness codex
 ```
@@ -116,7 +123,8 @@ cowbox install-skill --harness codex
 
 `cowbox demo` 会在 `/tmp` 创建隔离 fixture，执行破坏性命令、预览 commit、
 回滚并校验文件恢复，全程不触碰当前项目。使用 `--keep` 可保留现场，使用
-`--json` 可获得机器可读结果。
+`--json` 可获得机器可读结果。`demo --offline` 会用 `network=off` 完成真实执行、
+diff 和回滚。
 
 在项目里：
 
@@ -188,6 +196,40 @@ commit 或 discard 后的 session 会保留用于审计。`cowbox sessions` 可�
 `cowbox gc` 默认删除 7 天前的 finalized session，绝不会删除 active session。
 `--all` 忽略时间阈值，`--dry-run` 预览，`--yes` 用于非交互执行。
 
+### 网络策略
+
+`cowbox run --network host|off` 为当前 step 选择网络策略。优先级为 CLI →
+项目配置 → `host`：
+
+```toml
+[sandbox]
+network = "off"
+```
+
+`off` 使用独立 Linux 网络命名空间，没有宿主网络接口，loopback 保持 DOWN，因此
+对宿主和外部的 IPv4、IPv6、TCP、UDP 连接都会失败。这是 IP 连通性隔离，不是
+防火墙，也不是 seccomp 网络策略。
+
+基于文件路径的 Unix-domain socket 属于 IPC 边界：只要 Landlock 允许该路径，它
+在 network namespace 之间仍可访问。需要禁止 Agent 访问某个 Unix socket 时，应
+使用 Landlock 路径规则。
+
+每个逻辑 step 会记录实际生效的策略。`run --json` 在 `data.policy` 中返回，
+`stats --json` 返回当前快照的策略。没有记录字段的旧会话仍可读取，并报告
+`"recorded": false` 与 network `"unknown"`。
+
+```bash
+cowbox run --json --network off -- python3 ./offline_job.py
+cowbox stats --json
+cowbox doctor --check-run --network off --json
+```
+
+`doctor --check-run` 保留原有静态诊断，并在临时 fixture 中走真实 helper、
+namespace、OverlayFS、状态盘、Landlock 和用户命令路径。`run_check.stages` 会区分
+user namespace、network namespace、OverlayFS、状态盘和 Landlock 故障。网络
+命名空间创建失败返回 `NETWORK_NAMESPACE_FAILED`、退出码 125，并报告
+`command_started: false`。
+
 ### 长会话与宿主缓存
 
 跨过物理层数或 lowerdir 长度限制时，cowbox 会自动压缩当前分支最旧的一段祖先层，
@@ -207,14 +249,26 @@ lowerdir 挂载，索引刷新、新下载和解包写入会话自己的 upper �
 配置仍留在隔离 HOME 中。`cowbox doctor` 会列出配置的缓存源及可用状态。pip 的
 `wheelhouse/` 会通过 `PIP_FIND_LINKS` 暴露，支持带哈希锁定的离线安装。
 
+`scripts/offline_workflow.py` 只生成本地 fixture，验证 Cargo 本地目录源、npm
+`_cacache`、pip wheelhouse 的冷缺失与预热命中，以及会话缓存写入、宿主缓存哈希
+不变、diff 和 undo。所有执行都使用 `--network off`，不依赖公网包仓库：
+
+```bash
+python3 scripts/offline_workflow.py \
+  --binary "$COWBOX_BIN" \
+  --json-output "$HOME/cowbox-bench-results/offline.json"
+```
+
 ## 安全模型
 
 - cowbox 使用 **Landlock ABI 3** 做路径级读写围栏，使用 **PID namespace** 与 PID 1
   supervisor 做进程树回收。
 - 活跃 session 期间，宿主机 workspace 视为**只读**。lowerdir 是实时目录，因此
   commit 通过 base manifest 检测外部修改；默认拒绝，`--force` 也会先备份。
-- cowbox **不隔离网络**。沙盒内进程可以绑定宿主机端口、访问网络。网络策略计划在 M2。
-- M1 防的是**误操作和 Agent 失控**，不是恶意代码的硬化沙盒。内核漏洞与蓄意恶意
+- 默认网络策略是 `host`：进程可以绑定宿主端口并访问网络。`run --network off`
+  通过独立 Linux 网络命名空间移除 IP 连通性。它不是防火墙，不能按目标过滤，
+  也不隔离基于文件路径的 Unix socket。
+- M2 防的是**误操作和 Agent 失控**，不是恶意代码的硬化沙盒。内核漏洞与蓄意恶意
   二进制不在威胁模型内。
 - `cowbox commit` 在终端中要求人工确认；非交互调用只有在取得人工批准后使用
   `cowbox commit --yes`。
@@ -257,11 +311,12 @@ lowerdir 挂载，索引刷新、新下载和解包写入会话自己的 upper �
 | --- | --- | --- |
 | **M1** | Linux/WSL2 CLI、快照 DAG、OverlayFS、Landlock、commit journal、测试、基准 | 预览可用 |
 | **M1.5** | Windows 启动器、`setup`、多 harness skill 安装、项目规则与策略 | 预览可用 |
-| **M2** | 长会话、只读宿主缓存、性能优化、20 万文件基准 | 预览可用；网络策略仍在计划中 |
+| **M2** | 长会话、网络策略、离线诊断/工作流、只读宿主缓存、20 万文件基准 | 预览可用 |
 | **M3** | MCP 代理（`cowbox_diff` / `cowbox_rollback` / `cowbox_commit`） | 计划中 |
 | **M4** | Windows 原生 ReFS + Job Object 后端、macOS 后端、Eval 套件与公开榜单 | 计划中 |
 
-M1 明确不包含 MCP、Windows 原生、macOS、网络隔离和多 Agent 赛马。边界以
+M1 明确不包含 MCP、Windows 原生、macOS、网络隔离和多 Agent 赛马。M2 增加可选
+网络命名空间隔离，但不宣称包过滤或恶意代码隔离。边界以
 [roadmap](docs/ROADMAP.md) 为准。
 
 ## 参与贡献

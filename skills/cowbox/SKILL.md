@@ -63,8 +63,10 @@ Use cowbox for:
 
 Do not use cowbox for `ls`, `cat`, `rg`, `git status`, or other read-only
 commands. Do not use it for a single-file edit that does not touch local state.
-Do not use it as a malware sandbox: cowbox does not isolate the network, undo
-remote database changes, or stop a process from exfiltrating readable files.
+Do not use it as a malware sandbox. The default network policy is `host`;
+`cowbox run --network off` isolates IPv4/IPv6 TCP/UDP connectivity but does not
+isolate filesystem-backed Unix sockets, undo remote database changes, or stop a
+process from exfiltrating readable files.
 
 ## Typical loop
 
@@ -99,7 +101,7 @@ command needs an explicit WSL path.
   installs explicitly; `--all` installs into every supported harness.
 - `cowbox init --agent` writes the project rule blocks for AGENTS.md,
   CLAUDE.md and Cursor.
-- Codex Desktop's built-in file editor is not intercepted in M1.5. Only commands
+- Codex Desktop's built-in file editor is not intercepted in M2. Only commands
   routed through cowbox are protected; the native Windows backend is a later
   milestone.
 
@@ -109,6 +111,7 @@ Use `--json` when another tool needs to parse results:
 
 ```bash
 cowbox run --json -- cargo test
+cowbox run --json --network off -- ./offline-check
 cowbox diff --json
 cowbox log --json
 cowbox stats --json
@@ -124,7 +127,7 @@ cowbox stats --json
 ## Boundary
 
 This skill uses the CLI. The MCP proxy and synthetic `cowbox_diff` /
-`cowbox_rollback` / `cowbox_commit` tools are not part of M1.5; do not assume
+`cowbox_rollback` / `cowbox_commit` tools are not part of M2; do not assume
 they exist. Codex Desktop built-in edits are outside this boundary until the
-native Windows backend lands. Network isolation is also outside this boundary;
-cowbox protects workspace files, not remote services or exfiltrated data.
+native Windows backend lands. `run --network off` is available, but it isolates
+IP connectivity only and is not a packet-filtering sandbox.

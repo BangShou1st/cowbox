@@ -138,6 +138,7 @@ impl SandboxBackend for LinuxBackend {
             isolate_caches: policy.isolate_caches,
             extra_ro_paths: policy.extra_ro_paths.clone(),
             extra_rw_paths: policy.extra_rw_paths.clone(),
+            network: policy.network,
             cache_mounts,
             timeout_ms: policy
                 .timeout
@@ -214,7 +215,7 @@ impl SandboxBackend for LinuxBackend {
         if let Some(error) = result.error {
             let _ = fs::remove_dir_all(&step_dir);
             let _ = fs::remove_dir_all(&alias_dir);
-            return Err(CoreError::IsolationFailed(error));
+            return Err(exec_error(result.error_code.as_deref(), error));
         }
 
         let _ = fs::remove_dir_all(&spec.merged_dir);
@@ -456,13 +457,23 @@ fn handshake(child: &mut Child, spec: &RunSpec) -> Result<()> {
     let gid = getgid().as_raw();
     let _ = fs::write(format!("/proc/{pid}/setgroups"), "deny\n");
     fs::write(format!("/proc/{pid}/uid_map"), format!("0 {uid} 1\n")).map_err(|error| {
-        CoreError::IsolationFailed(format!("cannot write uid_map for helper: {error}"))
+        CoreError::UserNamespace(format!("cannot write uid_map for helper: {error}"))
     })?;
     fs::write(format!("/proc/{pid}/gid_map"), format!("0 {gid} 1\n")).map_err(|error| {
-        CoreError::IsolationFailed(format!("cannot write gid_map for helper: {error}"))
+        CoreError::UserNamespace(format!("cannot write gid_map for helper: {error}"))
     })?;
     fs::write(&spec.go_path, "go\n")?;
     Ok(())
+}
+
+fn exec_error(code: Option<&str>, message: String) -> CoreError {
+    match code {
+        Some("USER_NAMESPACE_FAILED") => CoreError::UserNamespace(message),
+        Some("NETWORK_NAMESPACE_FAILED") => CoreError::NetworkNamespace(message),
+        Some("OVERLAYFS_FAILED") => CoreError::OverlayFilesystem(message),
+        Some("LANDLOCK_FAILED") => CoreError::Landlock(message),
+        _ => CoreError::IsolationFailed(message),
+    }
 }
 
 fn read_result(path: &Path) -> Result<ExecResult> {
@@ -484,21 +495,19 @@ fn capture_output(bytes: Vec<u8>) -> (String, bool) {
 }
 
 fn make_tree_writable(root: &Path) -> Result<()> {
-    for entry in walkdir::WalkDir::new(root)
-        .contents_first(true)
-        .follow_links(false)
-    {
-        let entry = entry.map_err(|error| {
-            CoreError::Io(std::io::Error::other(format!(
-                "cannot walk session tree for discard: {error}"
-            )))
-        })?;
-        let metadata = fs::symlink_metadata(entry.path())?;
+    fn visit(path: &Path) -> Result<()> {
+        let metadata = fs::symlink_metadata(path)?;
         if metadata.file_type().is_symlink() {
-            continue;
+            return Ok(());
         }
         let mode = if metadata.is_dir() { 0o700 } else { 0o600 };
-        fs::set_permissions(entry.path(), fs::Permissions::from_mode(mode))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path)? {
+                visit(&entry?.path())?;
+            }
+        }
+        Ok(())
     }
-    Ok(())
+    visit(root)
 }

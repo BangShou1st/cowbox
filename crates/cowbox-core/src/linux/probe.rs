@@ -41,7 +41,9 @@ pub fn probe(state_root: &Path) -> Result<Capabilities> {
             state_root.display()
         ));
     }
-    notes.push("network isolation is not implemented in M1".to_string());
+    notes.push(
+        "network isolation uses a separate network namespace for `run --network off`".to_string(),
+    );
     notes.push("whiteout kind is confirmed by the first real run".to_string());
 
     Ok(Capabilities {
