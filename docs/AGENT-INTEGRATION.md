@@ -90,6 +90,10 @@ Every tool result carries `_meta.cowbox` with the workspace, bound session,
 rollback/commit commands. A visible text block repeats the snapshot summary.
 Failures after step creation retain that metadata, so an agent can explicitly
 call `cowbox_rollback`.
+`head_before` comes from the executed run's locked `parent_step`, and both
+terminal commands include the bound `--session`, so a concurrently completed
+terminal step is preserved and a later session switch cannot redirect an old
+command.
 
 Control commands are invoked with an explicit `--session` bound to the proxy.
 The CLI checks that session against the active pointer under the session lock
@@ -149,8 +153,8 @@ python3 scripts/acceptance_m3_agent.py \
 It disables Claude's native file tools, requires the MCP upstream tools plus
 the three cowbox control tools, writes a wrong file, inspects it, rolls back,
 rewrites the correct content, previews the commit, and then performs a real PTY
-confirmation with `cowbox commit --step <n>`. The report preserves the
-Claude JSONL stream beside the JSON output.
+confirmation with the returned `cowbox commit --step <n> --session <id>`
+command. The report preserves the Claude JSONL stream beside the JSON output.
 
 For the Windows launcher's persistent stdio path, run
 `scripts/acceptance_m3_windows.py` with a Windows Python interpreter. It keeps
@@ -168,7 +172,7 @@ claim.
 `cowbox commit --dry-run` path and returns:
 
 ```text
-cowbox commit --step <n>
+cowbox commit --step <n> --session <id>
 ```
 
 The user must run that command in the same workspace terminal and approve the

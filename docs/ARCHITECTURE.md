@@ -413,6 +413,9 @@ process is started fresh for each call; cross-call state must live in workspace
 files. Every tool result carries `_meta.cowbox` with the bound session,
 `head_before`, actual `step`, `head_after`, exit status, timeout flag, and
 rollback/commit commands. A visible content block repeats the snapshot summary.
+`head_before` is read from the executed `run` result's locked `parent_step`, not
+from an earlier observation, so a concurrent terminal step is never skipped by
+the rollback hint.
 
 The reserved control tools do not create steps:
 
@@ -431,6 +434,10 @@ session lock, so a concurrent pointer change cannot redirect a diff, rollback,
 or commit dry-run into another session. Explicit network policy is also
 forwarded as a CLI override; a project-level `off` cannot replace an explicit
 `--network host`.
+
+Returned terminal commands also include `--session <id>`. They remain safe to
+reuse after a session switch: the CLI returns `SESSION_NOT_ACTIVE` and leaves
+the new session untouched.
 
 The adapter maps absolute upstream command arguments that start with the
 workspace root into the merged overlay mount. This allows file-based MCP server

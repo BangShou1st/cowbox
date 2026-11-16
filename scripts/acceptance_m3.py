@@ -165,12 +165,13 @@ def commit_with_terminal_confirmation(
     workspace: pathlib.Path,
     state: pathlib.Path,
     step: int,
+    session: str,
 ) -> dict:
     env = os.environ.copy()
     env["COWBOX_HOME"] = str(state)
     master, slave = pty.openpty()
     process = subprocess.Popen(
-        [str(binary), "commit", "--step", str(step)],
+        [str(binary), "commit", "--step", str(step), "--session", session],
         cwd=workspace,
         env=env,
         stdin=slave,
@@ -352,13 +353,23 @@ def run_workflow(binary: pathlib.Path, root: pathlib.Path, server: pathlib.Path)
         report["commit_preview"] = preview["structuredContent"]
         assert report["commit_preview"]["committed"] is False
         assert report["commit_preview"]["target_step"] == target
+        assert report["commit_preview"]["terminal_command"] == (
+            f"cowbox commit --step {target} "
+            f"--session {report['right_step']['session']}"
+        )
         assert not (workspace / "app.txt").exists()
     finally:
         listener.close()
         proxy_exit = client.close()
         report["proxy_exit_code"] = proxy_exit
 
-    terminal = commit_with_terminal_confirmation(binary, workspace, state, 4)
+    terminal = commit_with_terminal_confirmation(
+        binary,
+        workspace,
+        state,
+        report["right_step"]["step"],
+        report["right_step"]["session"],
+    )
     report["terminal_commit"] = terminal
     assert terminal["exit_code"] == 0, terminal
     assert terminal["confirmation_submitted"], terminal

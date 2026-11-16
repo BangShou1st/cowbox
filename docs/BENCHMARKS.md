@@ -1396,7 +1396,8 @@ The same acceptance run completed the full workflow:
 - `WRONG` write, read-back, diff, rollback to head 0;
 - `Network is unreachable` under `--network off`, then a second rollback;
 - `RIGHT` write at step 4, diff, and commit dry-run;
-- PTY-confirmed `cowbox commit --step 4`; host content was exactly `RIGHT\n`;
+- PTY-confirmed session-bound commit of step 4; host content was exactly
+  `RIGHT\n`;
 - final session status `committed`, proxy exit 0.
 
 The raw JSON is

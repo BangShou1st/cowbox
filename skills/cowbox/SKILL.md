@@ -113,7 +113,8 @@ cowbox mcp-proxy --network off -- <upstream MCP command>
    fix. If the step is bad, call `cowbox_rollback` with the pre-edit head.
 3. Reapply the intended change after a rollback, then inspect the net diff.
 4. Call `cowbox_commit` only to preview. It returns the target step and the
-   terminal command. Tell the user to run that command and approve the prompt.
+   session-bound terminal command. Tell the user to run that exact command
+   (`cowbox commit --step <n> --session <id>`) and approve the prompt.
 
 The proxy starts a fresh upstream process per call. If the upstream server
 needs state across calls, it must save that state in workspace files. Do not

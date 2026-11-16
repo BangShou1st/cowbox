@@ -40,6 +40,8 @@ All notable changes to this project are documented here. The format follows
   whitespace and verifies every downloaded checksum before publishing.
 - The cowbox skill documents MCP snapshot use, rollback-first recovery, and the
   terminal commit boundary.
+- `run --json` now includes `data.parent_step`, the session head observed
+  under the step lock before the command was added.
 
 ### Fixed
 
@@ -50,6 +52,12 @@ All notable changes to this project are documented here. The format follows
 - An explicit `mcp-proxy --network host` is now forwarded to every sandbox
   step, so a project `[sandbox] network = "off"` cannot override the caller's
   explicit choice.
+- MCP snapshot metadata now uses the executed step's locked parent, not a
+  pre-call observation, so rollback hints preserve a terminal step that lands
+  between the observation and the MCP `run`.
+- Returned rollback and commit commands include `--session <id>`. Reusing them
+  after a session switch fails with `SESSION_NOT_ACTIVE` instead of acting on
+  the new active session.
 
 ### Known limitations
 

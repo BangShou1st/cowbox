@@ -187,6 +187,7 @@ fn command_run(args: &RunArgs) -> CliResult<i32> {
             Some(&record),
             json!({
                 "step": step_id,
+                "parent_step": previous_head,
                 "exit_code": outcome.exit_code,
                 "signal": outcome.signal,
                 "duration_ms": outcome.duration_ms,

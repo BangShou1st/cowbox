@@ -37,7 +37,8 @@ The proxy exposes the upstream tools plus:
 Each upstream result includes `_meta.cowbox` with `session`, `head_before`,
 `step`, `head_after`, and rollback metadata. If a result is wrong, inspect the
 diff and roll back to the prior head before retrying. A commit is always a
-separate terminal action performed by the user.
+separate terminal action performed by the user with the returned
+`cowbox commit --step <n> --session <id>` command.
 
 Cross-call state must be stored in workspace files because the upstream process
 is started anew for every call. HTTP/SSE upstreams, resources, prompts, and

@@ -298,7 +298,7 @@ impl Proxy {
                     "name": "cowbox",
                     "version": env!("CARGO_PKG_VERSION"),
                 },
-                "instructions": "Use upstream tools for workspace edits. Each tools/call creates a cowbox snapshot step. Inspect with cowbox_diff and use cowbox_rollback instead of stacking fixes. cowbox_commit only previews changes; the user must run `cowbox commit --step <n>` in the same workspace terminal and approve it."
+                "instructions": "Use upstream tools for workspace edits. Each tools/call creates a cowbox snapshot step. Inspect with cowbox_diff and use cowbox_rollback instead of stacking fixes. cowbox_commit only previews changes; the user must run the returned session-bound `cowbox commit --step <n> --session <id>` command in the same workspace terminal and approve it."
             }),
         )
     }
@@ -426,7 +426,9 @@ impl Proxy {
             Ok(snapshot) => snapshot,
             Err(error) => return self.tool_error_without_step(&error),
         };
-        let head_before = before.as_ref().map(|session| session.head).unwrap_or(0);
+        let observed_head_before = before.as_ref().map(|session| session.head).unwrap_or(0);
+        #[cfg(debug_assertions)]
+        pause_before_test_run();
         let request = AdapterRequest {
             mode: AdapterMode::Call,
             workspace: self.workspace.clone(),
@@ -443,7 +445,12 @@ impl Proxy {
                     "MCP_SANDBOX_FAILED",
                     error.message,
                     error.hint,
-                    base_metadata(&self.workspace, self.session.as_deref(), head_before, None),
+                    base_metadata(
+                        &self.workspace,
+                        self.session.as_deref(),
+                        observed_head_before,
+                        None,
+                    ),
                 );
             }
         };
@@ -452,7 +459,12 @@ impl Proxy {
                 "CLIENT_DISCONNECTED",
                 "MCP client disconnected",
                 None,
-                base_metadata(&self.workspace, self.session.as_deref(), head_before, None),
+                base_metadata(
+                    &self.workspace,
+                    self.session.as_deref(),
+                    observed_head_before,
+                    None,
+                ),
             );
         }
         let envelope = execution.envelope.as_ref();
@@ -476,9 +488,18 @@ impl Proxy {
                 code,
                 message,
                 hint.map(ToString::to_string),
-                base_metadata(&self.workspace, self.session.as_deref(), head_before, None),
+                base_metadata(
+                    &self.workspace,
+                    self.session.as_deref(),
+                    observed_head_before,
+                    None,
+                ),
             );
         }
+        let head_before = envelope
+            .and_then(|value| value.pointer("/data/parent_step"))
+            .and_then(Value::as_u64)
+            .unwrap_or(observed_head_before);
         let session = envelope.and_then(session_from_envelope);
         let step = envelope
             .and_then(|value| value.pointer("/data/step"))
@@ -591,6 +612,7 @@ impl Proxy {
                 head_before,
                 step,
                 head_after,
+                self.session.as_deref(),
             ),
         );
         Value::Object(result_object)
@@ -681,7 +703,10 @@ impl Proxy {
                 object.insert("target_step".to_string(), json!(target));
                 object.insert(
                     "terminal_command".to_string(),
-                    json!(format!("cowbox commit --step {target}")),
+                    json!(format!(
+                        "cowbox commit --step {target} --session {}",
+                        session.id
+                    )),
                 );
             }
         }
@@ -1166,6 +1191,20 @@ fn session_from_envelope(envelope: &Value) -> Option<SessionSnapshot> {
     })
 }
 
+#[cfg(debug_assertions)]
+fn pause_before_test_run() {
+    let Some(directory) = std::env::var_os("COWBOX_MCP_TEST_PAUSE_BEFORE_RUN") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    let _ = std::fs::create_dir_all(&directory);
+    let _ = std::fs::write(directory.join("ready"), b"ready\n");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !directory.join("release").exists() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn base_metadata(
     workspace: &Path,
     session: Option<&str>,
@@ -1192,8 +1231,11 @@ fn snapshot_metadata(
     let head_after = session.map(|session| session.head).unwrap_or(head_before);
     let rollback_command = step
         .filter(|step| *step > head_before)
-        .map(|_| format!("cowbox rollback {head_before}"));
-    let commit_command = step.map(|step| format!("cowbox commit --step {step}"));
+        .zip(session)
+        .map(|(_, session)| format!("cowbox rollback {head_before} --session {}", session.id));
+    let commit_command = step
+        .zip(session)
+        .map(|(step, session)| format!("cowbox commit --step {step} --session {}", session.id));
     json!({
         "session": session.map(|session| session.id.clone()),
         "workspace": workspace,
@@ -1224,17 +1266,21 @@ fn append_snapshot_content(
     head_before: u64,
     step: Option<u64>,
     head_after: Option<u64>,
+    session: Option<&str>,
 ) -> Value {
     let mut blocks = content
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_default();
-    let snapshot = match step {
-        Some(step) => format!(
-            "[cowbox] snapshot step {step} created; head {head_before} -> {}. Inspect with cowbox_diff or use cowbox_rollback {} to discard it. Host commit requires terminal approval.",
-            head_after.unwrap_or(step),
-            head_before
+    let snapshot = match (step, session) {
+        (Some(step), Some(session)) => format!(
+            "[cowbox] snapshot step {step} created; head {head_before} -> {}. Inspect with cowbox_diff or run `cowbox rollback {head_before} --session {session}` to discard this step. Host commit requires `cowbox commit --step {step} --session {session}` in a terminal and human approval.",
+            head_after.unwrap_or(step)
         ),
-        None => format!("[cowbox] no snapshot step was created; head remains {head_before}."),
+        (Some(step), None) => format!(
+            "[cowbox] snapshot step {step} created; head {head_before} -> {}. Inspect with cowbox_diff; host commit requires terminal approval.",
+            head_after.unwrap_or(step)
+        ),
+        (None, _) => format!("[cowbox] no snapshot step was created; head remains {head_before}."),
     };
     blocks.push(json!({ "type": "text", "text": snapshot }));
     Value::Array(blocks)

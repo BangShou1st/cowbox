@@ -35,7 +35,7 @@ model:
 - `cowbox_diff` inspects the net snapshot;
 - `cowbox_rollback` moves the session head and never writes the host;
 - `cowbox_commit` previews the existing dry-run and returns
-  `cowbox commit --step <n>`.
+  `cowbox commit --step <n> --session <id>`.
 
 The user runs the commit command in the same workspace terminal and approves
 the prompt. Do not ask for or invent an MCP force/yes parameter.

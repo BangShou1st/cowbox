@@ -43,12 +43,13 @@ def run_pty_commit(
     workspace: pathlib.Path,
     state: pathlib.Path,
     step: int,
+    session: str,
 ) -> dict:
     env = os.environ.copy()
     env["COWBOX_HOME"] = str(state)
     master, slave = pty.openpty()
     process = subprocess.Popen(
-        [str(binary), "commit", "--step", str(step)],
+        [str(binary), "commit", "--step", str(step), "--session", session],
         cwd=workspace,
         env=env,
         stdin=slave,
@@ -303,7 +304,8 @@ def main() -> int:
         assert log["exit_code"] == 0, log
         assert log["json"]["session"]["head"] == 3, log
         target = log["json"]["session"]["head"]
-        terminal = run_pty_commit(binary, workspace, state, target)
+        session_id = log["json"]["session"]["id"]
+        terminal = run_pty_commit(binary, workspace, state, target, session_id)
         assert terminal["exit_code"] == 0, terminal
         assert terminal["confirmation_submitted"], terminal
         assert (workspace / "app.txt").read_text(encoding="utf-8") == "RIGHT\n"

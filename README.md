@@ -311,8 +311,9 @@ Three reserved control tools are always present:
 | `cowbox_commit` | Existing commit dry-run; returns the target step and terminal command |
 
 `cowbox_commit` never writes the host. After human review, the user runs
-`cowbox commit --step <n>` in a terminal in the same workspace and completes the
-normal interactive confirmation.
+the returned session-bound `cowbox commit --step <n> --session <id>` command in
+a terminal in the same workspace and completes the normal interactive
+confirmation.
 
 Control commands are bound to the proxy's session: the CLI rejects a selected
 session if it is no longer the workspace's active pointer. An explicit

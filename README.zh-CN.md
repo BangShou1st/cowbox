@@ -279,7 +279,7 @@ cowbox mcp-proxy --network off -- python3 /path/to/your/mcp-server.py
 | `cowbox_commit` | 复用现有 commit dry-run；返回目标 step 与终端命令 |
 
 `cowbox_commit` 永不写宿主机。人工检查后，由用户在同一 workspace 的终端执行
-`cowbox commit --step <n>` 并完成原有交互确认。
+工具返回的 `cowbox commit --step <n> --session <id>` 并完成原有交互确认。
 
 控制命令会显式绑定代理的 session：如果它已不是该 workspace 的 active 指针，
 CLI 会拒绝操作，不会误改另一个 session。显式 `--network host` 也会覆盖项目里的

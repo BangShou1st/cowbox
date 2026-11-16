@@ -40,6 +40,16 @@ impl Fixture {
     }
 
     fn client_network(&self, network: &str, extra: &[&str], server_args: &[&str]) -> Client {
+        self.client_network_env(network, extra, server_args, &[])
+    }
+
+    fn client_network_env(
+        &self,
+        network: &str,
+        extra: &[&str],
+        server_args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> Client {
         let binary = assert_cmd::cargo::cargo_bin("cowbox");
         let mut command = std::process::Command::new(binary);
         command
@@ -58,6 +68,9 @@ impl Fixture {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        for (key, value) in envs {
+            command.env(key, value);
+        }
         Client::start(command)
     }
 }
@@ -133,7 +146,23 @@ impl Client {
         self.request_with_id(json!(id), method, params)
     }
 
+    fn start_request(&mut self, method: &str, params: Value) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send_request_with_id(json!(id), method, params);
+        id
+    }
+
+    fn receive_request(&mut self, id: i64, method: &str) -> Value {
+        self.receive_with_id(json!(id), method)
+    }
+
     fn request_with_id(&mut self, id: Value, method: &str, params: Value) -> Value {
+        self.send_request_with_id(id.clone(), method, params);
+        self.receive_with_id(id, method)
+    }
+
+    fn send_request_with_id(&mut self, id: Value, method: &str, params: Value) {
         let mut message = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -143,6 +172,9 @@ impl Client {
             message["params"] = params;
         }
         self.send(message);
+    }
+
+    fn receive_with_id(&mut self, id: Value, method: &str) -> Value {
         let line = self
             .lines
             .recv_timeout(Duration::from_secs(180))
@@ -300,7 +332,13 @@ fn complete_snapshot_rollback_and_preview_workflow() {
     );
     assert_eq!(
         preview["structuredContent"]["terminal_command"].as_str(),
-        Some("cowbox commit --step 3")
+        Some(
+            format!(
+                "cowbox commit --step 3 --session {}",
+                first_meta["session"].as_str().expect("session")
+            )
+            .as_str()
+        )
     );
     assert!(!fixture.workspace.join("wrong.txt").exists());
 
@@ -308,7 +346,15 @@ fn complete_snapshot_rollback_and_preview_workflow() {
     let commit = std::process::Command::new(binary)
         .current_dir(&fixture.workspace)
         .env("COWBOX_HOME", &fixture.state)
-        .args(["commit", "--step", "3", "--yes", "--json"])
+        .args([
+            "commit",
+            "--step",
+            "3",
+            "--session",
+            first_meta["session"].as_str().expect("session"),
+            "--yes",
+            "--json",
+        ])
         .output()
         .expect("commit");
     assert!(
@@ -475,6 +521,113 @@ fn session_selector_refuses_to_touch_another_active_session() {
     assert_eq!(cleaned["ok"].as_bool(), Some(true), "{cleaned}");
 }
 
+#[test]
+fn rollback_hint_uses_the_locked_parent_step_not_the_observed_head() {
+    if !require_sandbox() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let first = run_step(&fixture, 1);
+    let session_id = first["session"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+    let pause = tempfile::tempdir().expect("pause directory");
+    let pause_value = pause.path().to_string_lossy().into_owned();
+    let mut client = fixture.client_network_env(
+        "off",
+        &[],
+        &[],
+        &[("COWBOX_MCP_TEST_PAUSE_BEFORE_RUN", &pause_value)],
+    );
+    client.initialize();
+    let request_id = client.start_request(
+        "tools/call",
+        json!({
+            "name": "write_file",
+            "arguments": { "path": "race.txt", "content": "race\n" }
+        }),
+    );
+    wait_for_path(&pause.path().join("ready"), Duration::from_secs(20));
+
+    let terminal_step = run_step(&fixture, 1);
+    assert_eq!(terminal_step["data"]["step"].as_u64(), Some(2));
+    std::fs::write(pause.path().join("release"), b"release\n").expect("release proxy");
+    let response = client.receive_request(request_id, "tools/call");
+    assert!(response.get("error").is_none(), "{response}");
+    let result = &response["result"];
+    let meta = &result["_meta"]["cowbox"];
+    assert_eq!(meta["head_before"].as_u64(), Some(2));
+    assert_eq!(meta["step"].as_u64(), Some(3));
+    let rollback_command = meta["rollback_command"].as_str().expect("rollback command");
+    assert_eq!(
+        rollback_command,
+        format!("cowbox rollback 2 --session {session_id}")
+    );
+
+    let rolled_back = run_command(
+        &fixture,
+        &["rollback", "2", "--session", &session_id, "--json"],
+    );
+    assert_eq!(
+        rolled_back["data"]["head"].as_u64(),
+        Some(2),
+        "{rolled_back}"
+    );
+    let log = run_command(&fixture, &["log", "--json"]);
+    assert!(log["data"]["dag"]["nodes"]["2"].is_object());
+    assert_eq!(log["session"]["head"].as_u64(), Some(2));
+    drop(client);
+    let cleaned = run_command(&fixture, &["discard", "--yes", "--purge", "--json"]);
+    assert_eq!(cleaned["ok"].as_bool(), Some(true), "{cleaned}");
+}
+
+#[test]
+fn terminal_commit_command_is_session_bound_and_rejects_switched_sessions() {
+    if !require_sandbox() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let mut client = fixture.client(&[], &[]);
+    client.initialize();
+    let write = client.call_tool(
+        "write_file",
+        json!({ "path": "wrong.txt", "content": "WRONG\n" }),
+    );
+    let session_id = write["_meta"]["cowbox"]["session"]
+        .as_str()
+        .expect("session")
+        .to_string();
+    let preview = client.call_tool("cowbox_commit", json!({ "step": 1 }));
+    assert_eq!(
+        preview["structuredContent"]["terminal_command"],
+        format!("cowbox commit --step 1 --session {session_id}")
+    );
+    drop(client);
+
+    let discarded = run_command(&fixture, &["discard", "--yes", "--json"]);
+    assert_eq!(discarded["ok"].as_bool(), Some(true), "{discarded}");
+    let current = run_step(&fixture, 1);
+    let current_session = current["session"]["id"]
+        .as_str()
+        .expect("current session")
+        .to_string();
+    assert_ne!(current_session, session_id);
+
+    let stale = run_command(
+        &fixture,
+        &["commit", "--step", "1", "--session", &session_id, "--json"],
+    );
+    assert_eq!(stale["ok"].as_bool(), Some(false), "{stale}");
+    assert_eq!(stale["error"]["code"], "SESSION_NOT_ACTIVE");
+    let log = run_command(&fixture, &["log", "--json"]);
+    assert_eq!(log["session"]["id"], current_session);
+    assert_eq!(log["session"]["head"].as_u64(), Some(1));
+    assert!(!fixture.workspace.join("wrong.txt").exists());
+    let cleaned = run_command(&fixture, &["discard", "--yes", "--purge", "--json"]);
+    assert_eq!(cleaned["ok"].as_bool(), Some(true), "{cleaned}");
+}
+
 fn run_step(fixture: &Fixture, count: usize) -> Value {
     let mut value = Value::Null;
     for _ in 0..count {
@@ -482,6 +635,18 @@ fn run_step(fixture: &Fixture, count: usize) -> Value {
         assert_eq!(value["ok"].as_bool(), Some(true), "{value}");
     }
     value
+}
+
+fn wait_for_path(path: &std::path::Path, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {}",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn run_command(fixture: &Fixture, args: &[&str]) -> Value {

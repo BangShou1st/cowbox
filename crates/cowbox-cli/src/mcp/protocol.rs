@@ -197,7 +197,7 @@ pub fn control_tools() -> Vec<Value> {
         }),
         json!({
             "name": "cowbox_commit",
-            "description": "Preview committing a cowbox snapshot with the existing dry-run checks. This never writes the host; the user must run `cowbox commit --step <n>` in a terminal and approve it.",
+            "description": "Preview committing a cowbox snapshot with the existing dry-run checks. This never writes the host; the user must run the returned session-bound `cowbox commit --step <n> --session <id>` command in a terminal and approve it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
