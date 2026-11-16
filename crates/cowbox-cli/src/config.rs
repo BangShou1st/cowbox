@@ -341,6 +341,7 @@ max_files_without_prompt = 5
         }
     }
 
+    #[cfg(not(windows))]
     pub fn host_cache_sources(&self, workspace: &Path) -> CliResult<Vec<HostCacheSource>> {
         self.sandbox.host_caches.sources(workspace)
     }
@@ -489,6 +490,7 @@ pip = false
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn host_caches_are_disabled_by_default() {
         let config = Config::default();
