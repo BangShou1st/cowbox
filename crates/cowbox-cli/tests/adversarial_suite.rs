@@ -1493,14 +1493,30 @@ fn long_session_compacts_mount_layers_and_preserves_logical_diff() {
 
     let (code, first) = run_script(
         &env,
-        "printf 'new\\n' > modify.txt && rm delete.txt && printf 'added\\n' > added.txt",
+        r#"printf 'new\n' > modify.txt
+rm delete.txt
+printf 'added\n' > added.txt
+mkdir swap
+printf 'swap child\n' > swap/child.txt
+printf 'readonly\n' > read-only.txt
+mkdir read-only-dir
+printf 'child\n' > read-only-dir/child.txt
+python3 - <<'PY'
+import os
+os.setxattr("read-only.txt", b"user.cowbox.test", b"file")
+os.setxattr("read-only-dir", b"user.cowbox.test", b"directory")
+os.chmod("read-only.txt", 0o444)
+os.chmod("read-only-dir", 0o555)
+PY"#,
     );
     assert_eq!(code, 0, "mutation run failed: {first}");
+    let (code, replaced) = run_script(&env, "rm -rf swap && printf 'now a file\\n' > swap");
+    assert_eq!(code, 0, "directory replacement run failed: {replaced}");
     let (code, before) = env.json(&["diff", "--json"]);
     assert_eq!(code, 0, "diff before compaction failed: {before}");
     let before_changes = before["data"]["changes"].clone();
 
-    for expected in 2..=155 {
+    for expected in 3..=155 {
         let (code, run) = env.json(&["run", "--json", "--", "true"]);
         assert_eq!(code, 0, "long-session step {expected} failed: {run}");
         assert_eq!(run["data"]["step"].as_u64(), Some(expected));
@@ -1524,7 +1540,18 @@ fn long_session_compacts_mount_layers_and_preserves_logical_diff() {
     );
     let (code, view) = run_script(
         &env,
-        "test ! -e delete.txt && test -f added.txt && test \"$(cat modify.txt)\" = new",
+        r#"test ! -e delete.txt
+test -f added.txt
+test "$(cat modify.txt)" = new
+test "$(cat swap)" = "now a file"
+test ! -e swap/child.txt
+python3 - <<'PY'
+import os
+assert os.getxattr("read-only.txt", b"user.cowbox.test") == b"file"
+assert os.getxattr("read-only-dir", b"user.cowbox.test") == b"directory"
+assert os.stat("read-only.txt").st_mode & 0o777 == 0o444
+assert os.stat("read-only-dir").st_mode & 0o777 == 0o555
+PY"#,
     );
     assert_eq!(code, 0, "compacted sandbox view diverged: {view}");
 

@@ -35,6 +35,21 @@ All notable changes to this project are documented here. The format follows
   counts, and logical/allocated disk growth. The fixed-binary regression round
   is recorded in `docs/BENCHMARKS.md`.
 
+### Fixed
+
+- Layer compaction now clears descendants when a higher layer replaces a
+  directory with a file or symlink.
+- Compaction copies `user.*` xattrs before restoring read-only file or
+  directory modes.
+- Interrupted compaction can remove stale temporary trees that contain
+  read-only entries before retrying.
+- State cleanup and shape validation use path-range operations instead of
+  scanning every upper entry for every change, removing the previous quadratic
+  compaction cost.
+- The benchmark harness rejects unexpected candidate `CONFIG_ERROR` exits;
+  only an explicit `--allow-legacy-layer-limit` accepts the pre-compaction
+  release binary stopping after step 151.
+
 ## [0.4.0-m2] - 2026-11-16
 
 ### Added

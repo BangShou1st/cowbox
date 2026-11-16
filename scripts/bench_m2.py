@@ -55,6 +55,14 @@ def parse_args() -> argparse.Namespace:
         default=100,
         help="files in the long-session fixture",
     )
+    parser.add_argument(
+        "--allow-legacy-layer-limit",
+        action="store_true",
+        help=(
+            "accept CONFIG_ERROR after step 151 for the released binary that "
+            "predates layer compaction"
+        ),
+    )
     parser.add_argument("--samples", type=int, default=20)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=int, default=600)
@@ -814,6 +822,7 @@ def probe_long_session(
     state_base: Path,
     steps: int,
     timeout: int,
+    allow_legacy_layer_limit: bool,
 ) -> dict[str, Any]:
     print(
         f"[long-session] running {steps} steps through the 150-layer boundary",
@@ -839,7 +848,11 @@ def probe_long_session(
             )
             if process.returncode != 0 or envelope.get("ok") is not True:
                 error = envelope.get("error", {})
-                if expected_step > 151 and error.get("code") == "CONFIG_ERROR":
+                if (
+                    allow_legacy_layer_limit
+                    and expected_step > 151
+                    and error.get("code") == "CONFIG_ERROR"
+                ):
                     rejection = {
                         "step": expected_step,
                         "elapsed_ms": round(elapsed, 3),
@@ -1137,6 +1150,7 @@ def main() -> int:
             "depths": args.depths,
             "long_session_steps": args.long_session_steps,
             "long_session_file_count": args.long_session_file_count,
+            "allow_legacy_layer_limit": args.allow_legacy_layer_limit,
             "require_fs": args.require_fs,
             "timeout_seconds": args.timeout_seconds,
             "clock": "perf_counter around each CLI subprocess; fixture generation and cleanup excluded",
@@ -1216,6 +1230,7 @@ def main() -> int:
                     bench_root / "sample-states" / "long-session",
                     args.long_session_steps,
                     args.timeout_seconds,
+                    args.allow_legacy_layer_limit,
                 )
         result["machine"]["load_average_at_end"] = [
             round(value, 3) for value in os.getloadavg()

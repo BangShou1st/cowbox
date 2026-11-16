@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::ops::Bound::{Excluded, Unbounded};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -306,7 +307,7 @@ fn build_compacted_layer(
 
     let temp_root = temporary_root(layout, step_id);
     if temp_root.exists() {
-        fs::remove_dir_all(&temp_root)?;
+        remove_temporary_tree(&temp_root)?;
     }
     let temp_upper = temp_root.join("upper");
     fs::create_dir_all(&temp_upper)?;
@@ -339,7 +340,7 @@ fn build_compacted_layer(
             fs::create_dir_all(parent)?;
         }
         if target.exists() {
-            fs::remove_dir_all(&temp_root)?;
+            remove_temporary_tree(&temp_root)?;
             return read_compaction_metadata(&target);
         }
         fs::rename(&temp_root, &target)?;
@@ -358,7 +359,7 @@ fn build_compacted_layer(
             covered_logical: metadata.source_layers.len(),
         }),
         Err(error) => {
-            let _ = fs::remove_dir_all(&temp_root);
+            let _ = remove_temporary_tree(&temp_root);
             Err(error)
         }
     }
@@ -416,8 +417,18 @@ fn analyze_layers(directories: &[PathBuf]) -> Result<EffectiveState> {
                 }
                 UpperEntryKind::Entry => {
                     let was_deleted = state.deletions.remove(&item.rel_path);
-                    remove_entry_conflicts(&mut state, &item.rel_path);
+                    clear_ancestor_conflicts(&mut state, &item.rel_path);
                     let entry = EffectiveEntry::from_metadata(&item.source_path, &item.metadata)?;
+                    let previous_kind = state.entries.get(&item.rel_path).map(|entry| entry.kind);
+                    let merge_directory_children = entry.kind == EntryKind::Directory
+                        && !was_deleted
+                        && !matches!(
+                            previous_kind,
+                            Some(EntryKind::File | EntryKind::Symlink | EntryKind::Other)
+                        );
+                    if !merge_directory_children {
+                        remove_subtree(&mut state, &item.rel_path);
+                    }
                     if entry.kind == EntryKind::Directory && was_deleted {
                         state.opaques.insert(item.rel_path.clone());
                     }
@@ -431,50 +442,58 @@ fn analyze_layers(directories: &[PathBuf]) -> Result<EffectiveState> {
 }
 
 fn remove_subtree(state: &mut EffectiveState, rel_path: &Path) {
-    state
+    let entries = state
         .entries
-        .retain(|candidate, _| !candidate.starts_with(rel_path));
-    state
+        .range(rel_path.to_path_buf()..)
+        .take_while(|(candidate, _)| candidate.starts_with(rel_path))
+        .map(|(candidate, _)| candidate.clone())
+        .collect::<Vec<_>>();
+    for candidate in entries {
+        state.entries.remove(&candidate);
+    }
+    let deletions = state
         .deletions
-        .retain(|candidate| !candidate.starts_with(rel_path));
-    state
+        .range(rel_path.to_path_buf()..)
+        .take_while(|candidate| candidate.starts_with(rel_path))
+        .cloned()
+        .collect::<Vec<_>>();
+    for candidate in deletions {
+        state.deletions.remove(&candidate);
+    }
+    let opaques = state
         .opaques
-        .retain(|candidate| !candidate.starts_with(rel_path));
+        .range(rel_path.to_path_buf()..)
+        .take_while(|candidate| candidate.starts_with(rel_path))
+        .cloned()
+        .collect::<Vec<_>>();
+    for candidate in opaques {
+        state.opaques.remove(&candidate);
+    }
 }
 
-fn remove_entry_conflicts(state: &mut EffectiveState, rel_path: &Path) {
-    if let Some(ancestor) = state.entries.iter().find_map(|(candidate, entry)| {
-        (rel_path != candidate
-            && rel_path.starts_with(candidate)
-            && candidate.ancestors().count() < rel_path.ancestors().count()
-            && entry.kind != EntryKind::Directory)
-            .then(|| candidate.clone())
-    }) {
-        state.entries.remove(&ancestor);
-    }
-    if let Some(deleted_ancestor) = state
-        .deletions
-        .iter()
-        .find(|candidate| rel_path.starts_with(*candidate))
-        .cloned()
-    {
-        state.deletions.remove(&deleted_ancestor);
-        if let Some(entry) = state.entries.get_mut(&deleted_ancestor) {
-            if entry.kind == EntryKind::Directory {
-                state.opaques.insert(deleted_ancestor);
-            }
+fn clear_ancestor_conflicts(state: &mut EffectiveState, rel_path: &Path) {
+    for ancestor in rel_path.ancestors().skip(1) {
+        if state
+            .entries
+            .get(ancestor)
+            .is_some_and(|entry| entry.kind != EntryKind::Directory)
+        {
+            state.entries.remove(ancestor);
+        }
+        if state.deletions.remove(ancestor) {
+            state.opaques.insert(ancestor.to_path_buf());
         }
     }
 }
 
 fn validate_state_shape(state: &EffectiveState) -> Result<()> {
     for (path, entry) in &state.entries {
-        if entry.kind != EntryKind::Directory
-            && state
-                .entries
-                .keys()
-                .any(|candidate| candidate != path && candidate.starts_with(path))
-        {
+        let live_descendant = state
+            .entries
+            .range((Excluded(path.clone()), Unbounded))
+            .next()
+            .is_some_and(|(candidate, _)| candidate.starts_with(path));
+        if entry.kind != EntryKind::Directory && live_descendant {
             return Err(CoreError::StateCorrupted {
                 step: 0,
                 reason: format!(
@@ -598,8 +617,9 @@ fn materialize(state: &EffectiveState, upper: &Path, layout: &SessionLayout) -> 
                     fs::hard_link(hardlinks.get(&key).expect("checked hardlink"), &target)?;
                 } else {
                     fs::copy(&entry.source_path, &target)?;
-                    fs::set_permissions(&target, fs::Permissions::from_mode(entry.mode))?;
+                    fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
                     crate::xattr::copy(&entry.source_path, &target)?;
+                    fs::set_permissions(&target, fs::Permissions::from_mode(entry.mode))?;
                     set_file_mtime(
                         &target,
                         FileTime::from_unix_time(
@@ -675,12 +695,11 @@ fn materialize(state: &EffectiveState, upper: &Path, layout: &SessionLayout) -> 
     ordered_directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
     for path in ordered_directories {
         let target = upper.join(&path);
-        if let Some(source) = directories.get(&path) {
-            copy_directory_metadata(source, &target)?;
-        }
-        if state.opaques.contains(&path) {
-            set_xattr(&target, OPAQUE_XATTR, b"y")?;
-        }
+        finalize_directory_metadata(
+            directories.get(&path),
+            &target,
+            state.opaques.contains(&path),
+        )?;
     }
     Ok(())
 }
@@ -700,27 +719,37 @@ fn directory_source(
     }
 }
 
-fn copy_directory_metadata(source: &DirectorySource, target: &Path) -> Result<()> {
+fn finalize_directory_metadata(
+    source: Option<&DirectorySource>,
+    target: &Path,
+    opaque: bool,
+) -> Result<()> {
     let source_path = match source {
-        DirectorySource::Layer(path) | DirectorySource::Base(path) => Some(path),
-        DirectorySource::Generated => None,
+        Some(DirectorySource::Layer(path) | DirectorySource::Base(path)) => Some(path),
+        Some(DirectorySource::Generated) | None => None,
     };
-    if let Some(source_path) = source_path {
-        if let Ok(metadata) = fs::symlink_metadata(source_path) {
-            fs::set_permissions(target, fs::Permissions::from_mode(metadata.mode() & 0o7777))?;
-            crate::xattr::copy(source_path, target)?;
-            let mtime = manifest::mtime_ns(&metadata);
-            let _ = set_file_mtime(
-                target,
-                FileTime::from_unix_time(
-                    mtime.div_euclid(1_000_000_000) as i64,
-                    mtime.rem_euclid(1_000_000_000) as u32,
-                ),
-            );
-            return Ok(());
-        }
+    let metadata = source_path.and_then(|path| fs::symlink_metadata(path).ok());
+    if let Some(source_path) = source_path.filter(|_| metadata.is_some()) {
+        crate::xattr::copy(source_path, target)?;
     }
-    fs::set_permissions(target, fs::Permissions::from_mode(0o755))?;
+    if opaque {
+        set_xattr(target, OPAQUE_XATTR, b"y")?;
+    }
+    let mode = metadata
+        .as_ref()
+        .map(|metadata| metadata.mode() & 0o7777)
+        .unwrap_or(0o755);
+    fs::set_permissions(target, fs::Permissions::from_mode(mode))?;
+    if let Some(metadata) = metadata {
+        let mtime = manifest::mtime_ns(&metadata);
+        let _ = set_file_mtime(
+            target,
+            FileTime::from_unix_time(
+                mtime.div_euclid(1_000_000_000) as i64,
+                mtime.rem_euclid(1_000_000_000) as u32,
+            ),
+        );
+    }
     Ok(())
 }
 
@@ -926,10 +955,38 @@ fn cleanup_stale_temporary_directories(layout: &SessionLayout) -> Result<()> {
     };
     for entry in entries {
         let entry = entry?;
-        let metadata = fs::symlink_metadata(entry.path())?;
-        if metadata.is_dir() {
-            fs::remove_dir_all(entry.path())?;
+        remove_temporary_tree(&entry.path())?;
+    }
+    Ok(())
+}
+
+fn remove_temporary_tree(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        fs::remove_file(path)?;
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        fs::remove_file(path)?;
+        return Ok(());
+    }
+    make_tree_writable(path)?;
+    fs::remove_dir_all(path)?;
+    Ok(())
+}
+
+fn make_tree_writable(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        for entry in fs::read_dir(path)? {
+            make_tree_writable(&entry?.path())?;
         }
+    } else {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }
@@ -1216,5 +1273,154 @@ mod tests {
         assert_eq!(usage.logical_steps, MAX_MOUNT_LAYERS);
         assert_eq!(usage.mounted_layers, KEEP_RECENT_LAYERS + 2);
         assert_eq!(usage.compact_layers, 1);
+    }
+
+    #[test]
+    fn compaction_handles_a_directory_replaced_by_a_file() {
+        let (_root, layout) = fixture();
+        manifest::capture_base_manifest(&layout.workspace, &layout.base_manifest_path())
+            .expect("base manifest");
+        let first = layout.upper_dir(1);
+        write(&first.join("replaced/child.txt"), "child\n");
+        let second = layout.upper_dir(2);
+        write(&second.join("replaced"), "now a file\n");
+        let physical = vec![
+            MountLayer {
+                upper_dir: first,
+                alias: "l1".to_string(),
+                covered_logical: 1,
+            },
+            MountLayer {
+                upper_dir: second,
+                alias: "l2".to_string(),
+                covered_logical: 1,
+            },
+        ];
+
+        let compacted =
+            build_compacted_layer(&layout, 3, &[1, 2], &physical).expect("compacted layer");
+        assert_eq!(
+            fs::read_to_string(compacted.upper_dir.join("replaced")).expect("replacement file"),
+            "now a file\n"
+        );
+        assert!(!compacted.upper_dir.join("replaced/child.txt").exists());
+    }
+
+    #[test]
+    fn compaction_preserves_xattrs_from_read_only_entries() {
+        let (_root, layout) = fixture();
+        manifest::capture_base_manifest(&layout.workspace, &layout.base_manifest_path())
+            .expect("base manifest");
+        let first = layout.upper_dir(1);
+        write(&first.join("read-only.txt"), "same contents\n");
+        set_user_xattr(&first.join("read-only.txt"), "user.cowbox.test", b"file");
+        write(&first.join("read-only-dir/child.txt"), "child\n");
+        set_user_xattr(
+            &first.join("read-only-dir"),
+            "user.cowbox.dir",
+            b"directory",
+        );
+        fs::set_permissions(
+            first.join("read-only.txt"),
+            fs::Permissions::from_mode(0o444),
+        )
+        .expect("read-only file");
+        fs::set_permissions(
+            first.join("read-only-dir"),
+            fs::Permissions::from_mode(0o555),
+        )
+        .expect("read-only directory");
+        let physical = vec![MountLayer {
+            upper_dir: first,
+            alias: "l1".to_string(),
+            covered_logical: 1,
+        }];
+
+        let compacted =
+            build_compacted_layer(&layout, 2, &[1], &physical).expect("compacted layer");
+        assert_eq!(
+            user_xattr(
+                &compacted.upper_dir.join("read-only.txt"),
+                "user.cowbox.test"
+            ),
+            b"file"
+        );
+        assert_eq!(
+            user_xattr(
+                &compacted.upper_dir.join("read-only-dir"),
+                "user.cowbox.dir"
+            ),
+            b"directory"
+        );
+        assert_eq!(
+            fs::metadata(compacted.upper_dir.join("read-only.txt"))
+                .expect("file metadata")
+                .mode()
+                & 0o777,
+            0o444
+        );
+        assert_eq!(
+            fs::metadata(compacted.upper_dir.join("read-only-dir"))
+                .expect("directory metadata")
+                .mode()
+                & 0o777,
+            0o555
+        );
+    }
+
+    #[test]
+    fn cleanup_removes_read_only_temporary_trees() {
+        let (_root, layout) = fixture();
+        let stale = layout.session_dir.join("layers/tmp/stale/upper");
+        write(&stale.join("read-only-dir/file.txt"), "stale\n");
+        fs::set_permissions(
+            stale.join("read-only-dir/file.txt"),
+            fs::Permissions::from_mode(0o444),
+        )
+        .expect("read-only file");
+        fs::set_permissions(
+            stale.join("read-only-dir"),
+            fs::Permissions::from_mode(0o555),
+        )
+        .expect("read-only directory");
+
+        cleanup_stale_temporary_directories(&layout).expect("cleanup");
+        assert!(!layout.session_dir.join("layers/tmp/stale").exists());
+    }
+
+    #[test]
+    fn compaction_handles_a_large_upper_layer() {
+        let (_root, layout) = fixture();
+        manifest::capture_base_manifest(&layout.workspace, &layout.base_manifest_path())
+            .expect("base manifest");
+        let first = layout.upper_dir(1);
+        for directory in 0..100 {
+            for file in 0..100 {
+                write(
+                    &first.join(format!("tree/d{directory:03}/f{file:03}.txt")),
+                    "payload\n",
+                );
+            }
+        }
+        for index in 0..100 {
+            let path = first.join(format!("deleted-{index:03}"));
+            write(&path, "");
+            set_user_xattr(&path, "user.overlay.whiteout", b"y");
+        }
+        let physical = vec![MountLayer {
+            upper_dir: first,
+            alias: "l1".to_string(),
+            covered_logical: 1,
+        }];
+
+        let compacted =
+            build_compacted_layer(&layout, 2, &[1], &physical).expect("compacted layer");
+        assert!(compacted.upper_dir.join("tree/d099/f099.txt").is_file());
+        assert!(
+            fs::symlink_metadata(compacted.upper_dir.join("deleted-099"))
+                .expect("whiteout")
+                .file_type()
+                .is_char_device()
+        );
     }
 }
