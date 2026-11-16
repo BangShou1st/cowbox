@@ -225,12 +225,24 @@ def measure_protocol(binary: pathlib.Path, root: pathlib.Path, server: pathlib.P
     (workspace / "seed.txt").write_text("seed\n", encoding="utf-8")
     local_server = workspace / "mcp_upstream.py"
     shutil.copy2(server, local_server)
+    initialize = []
+    handshake = []
+    for _ in range(21):
+        started = time.perf_counter_ns()
+        fresh = McpClient(binary, workspace, state, local_server)
+        try:
+            initialize.append(fresh.initialize()["elapsed_ms"])
+            listed = fresh.request("tools/list")
+            assert listed["value"].get("error") is None, listed
+        finally:
+            fresh.close()
+        handshake.append((time.perf_counter_ns() - started) / 1_000_000)
+
     client = McpClient(binary, workspace, state, local_server)
     try:
-        initialize = []
-        for _ in range(21):
-            initialize.append(client.initialize()["elapsed_ms"])
+        client.initialize()
         discovery = client.request("tools/list")
+        assert discovery["value"].get("error") is None, discovery
         first_call = client.tool(
             "write_file",
             {"path": "seed.txt", "content": "seed\nwarm\n", "append": True},
@@ -240,11 +252,10 @@ def measure_protocol(binary: pathlib.Path, root: pathlib.Path, server: pathlib.P
             continuous.append(
                 client.tool("read_file", {"path": "seed.txt"})["elapsed_ms"]
             )
-        assert discovery["value"].get("error") is None, discovery
         assert first_call["value"]["result"].get("isError") is not True, first_call
         return {
-            "mcp_initialize_21": summarize(initialize),
-            "first_tool_discovery_ms": round(discovery["elapsed_ms"], 3),
+            "fresh_proxy_initialize_20_plus_1": summarize(initialize[1:]),
+            "fresh_proxy_first_handshake_20_plus_1": summarize(handshake[1:]),
             "first_tool_call_ms": round(first_call["elapsed_ms"], 3),
             "continuous_tool_calls_20_plus_1": summarize(continuous[1:]),
         }
