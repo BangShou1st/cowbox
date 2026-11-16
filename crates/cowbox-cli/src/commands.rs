@@ -1166,13 +1166,16 @@ struct GcPlan {
 fn command_stats(args: &StatsArgs) -> CliResult<i32> {
     let ctx = setup()?;
     let record = active_record(&ctx)?;
+    let backend = backend();
+    let layout = ctx.store.layout(&record.session_id);
+    let usage = backend.layer_usage(&layout, &record.dag.active_layer_chain())?;
     let orphans = record
         .dag
         .nodes
         .values()
         .map(|node| node.orphans_reaped)
         .sum();
-    let landlock_abi = backend()
+    let landlock_abi = backend
         .probe(&ctx.state_root)
         .ok()
         .and_then(|capabilities| capabilities.landlock_abi);
@@ -1180,6 +1183,9 @@ fn command_stats(args: &StatsArgs) -> CliResult<i32> {
         session_id: record.session_id.clone(),
         status: format!("{:?}", record.status),
         steps: record.dag.nodes.len().saturating_sub(1),
+        mounted_layers: usage.mounted_layers,
+        compact_layers: usage.compact_layers,
+        compacted_bytes: usage.compacted_bytes,
         rollbacks: record.rollback_count,
         orphans,
         disk_bytes: ctx.store.disk_usage(&record.session_id),
@@ -1193,6 +1199,10 @@ fn command_stats(args: &StatsArgs) -> CliResult<i32> {
             Some(&record),
             json!({
                 "steps": stats.steps,
+                "logical_steps": usage.logical_steps,
+                "mounted_layers": stats.mounted_layers,
+                "compact_layers": stats.compact_layers,
+                "compacted_bytes": stats.compacted_bytes,
                 "rollbacks": stats.rollbacks,
                 "orphans_reaped": stats.orphans,
                 "disk_bytes": stats.disk_bytes,

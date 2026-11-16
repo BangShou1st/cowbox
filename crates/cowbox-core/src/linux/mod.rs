@@ -11,12 +11,13 @@ pub use supervisor::supervisor_main;
 
 use crate::SandboxBackend;
 use crate::commit;
+use crate::compact::{self, MountLayer};
 use crate::diff;
 use crate::error::{CoreError, Result};
 use crate::layout::SessionLayout;
 use crate::manifest;
 use crate::model::{
-    Capabilities, CommitOptions, CommitReport, DiffOptions, ExecOutcome, FileChange,
+    Capabilities, CommitOptions, CommitReport, DiffOptions, ExecOutcome, FileChange, LayerUsage,
 };
 use crate::policy::ExecPolicy;
 use rustix::process::{Pid, Signal, getgid, getuid, kill_process_group};
@@ -31,8 +32,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const CAPTURE_LIMIT: usize = 1024 * 1024;
-const MAX_ALIAS_LAYERS: usize = 150;
-const MAX_LOWERDIR_BYTES: usize = 3800;
 
 pub struct LinuxBackend;
 
@@ -98,24 +97,14 @@ impl SandboxBackend for LinuxBackend {
                 reason: format!("step directory {} already exists", step_dir.display()),
             });
         }
+        let mount_layers = compact::prepare_mount_layers(layout, step_id, parent_layers)?;
         fs::create_dir_all(layout.upper_dir(step_id))?;
         fs::create_dir_all(layout.work_dir(step_id))?;
         fs::create_dir_all(layout.home_dir())?;
         fs::create_dir_all(layout.tmp_dir())?;
         fs::create_dir_all(layout.cache_dir())?;
 
-        for layer in parent_layers {
-            if !layout.upper_dir(*layer).is_dir() {
-                return Err(CoreError::StateCorrupted {
-                    step: *layer,
-                    reason: format!(
-                        "missing parent layer {}",
-                        layout.upper_dir(*layer).display()
-                    ),
-                });
-            }
-        }
-        let (alias_dir, lower_dirs) = match build_layer_aliases(layout, step_id, parent_layers) {
+        let (alias_dir, lower_dirs) = match build_layer_aliases(layout, step_id, &mount_layers) {
             Ok(value) => value,
             Err(error) => {
                 let _ = fs::remove_dir_all(&step_dir);
@@ -291,6 +280,10 @@ impl SandboxBackend for LinuxBackend {
         }
         Ok(())
     }
+
+    fn layer_usage(&self, layout: &SessionLayout, logical_layers: &[u64]) -> Result<LayerUsage> {
+        compact::inspect_layer_usage(layout, logical_layers)
+    }
 }
 
 fn helper_exe() -> Result<PathBuf> {
@@ -303,26 +296,27 @@ fn helper_exe() -> Result<PathBuf> {
 fn build_layer_aliases(
     layout: &SessionLayout,
     step_id: u64,
-    parent_layers: &[u64],
+    mount_layers: &[MountLayer],
 ) -> Result<(PathBuf, Vec<PathBuf>)> {
-    if parent_layers.len() > MAX_ALIAS_LAYERS {
+    if mount_layers.len() > compact::MAX_MOUNT_LAYERS {
         return Err(CoreError::Config(format!(
-            "session has {} layers; M1 supports at most {MAX_ALIAS_LAYERS}. Commit or discard this session and start a new one.",
-            parent_layers.len()
+            "session has {} physical layers; at most {} can be mounted even after compaction.",
+            mount_layers.len(),
+            compact::MAX_MOUNT_LAYERS
         )));
     }
 
-    let alias_dir = std::env::temp_dir().join(format!("cw{}{}", layout.session_id, step_id));
+    let alias_dir = compact::alias_dir(layout, step_id);
     if alias_dir.exists() {
         fs::remove_dir_all(&alias_dir)?;
     }
     fs::create_dir_all(&alias_dir)?;
     fs::set_permissions(&alias_dir, fs::Permissions::from_mode(0o700))?;
 
-    let mut lower_dirs = Vec::with_capacity(parent_layers.len() + 1);
-    for layer in parent_layers.iter().rev() {
-        let alias = alias_dir.join(format!("l{layer}"));
-        if let Err(error) = std::os::unix::fs::symlink(layout.upper_dir(*layer), &alias) {
+    let mut lower_dirs = Vec::with_capacity(mount_layers.len() + 1);
+    for layer in mount_layers.iter().rev() {
+        let alias = alias_dir.join(&layer.alias);
+        if let Err(error) = std::os::unix::fs::symlink(&layer.upper_dir, &alias) {
             let _ = fs::remove_dir_all(&alias_dir);
             return Err(error.into());
         }
@@ -335,10 +329,11 @@ fn build_layer_aliases(
         .filter_map(|path| path.to_str())
         .map(|path| path.len() + 1)
         .sum::<usize>();
-    if option_bytes > MAX_LOWERDIR_BYTES {
+    if option_bytes > compact::MAX_LOWERDIR_BYTES {
         let _ = fs::remove_dir_all(&alias_dir);
         return Err(CoreError::Config(format!(
-            "lowerdir option would be {option_bytes} bytes; limit is {MAX_LOWERDIR_BYTES}. Commit or discard this session and start a new one."
+            "lowerdir option would be {option_bytes} bytes; limit is {}. Layer compaction could not reduce it.",
+            compact::MAX_LOWERDIR_BYTES
         )));
     }
     Ok((alias_dir, lower_dirs))

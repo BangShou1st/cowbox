@@ -44,13 +44,17 @@ Status: preview released in `0.3.0-m1`.
 
 ## M2: stronger containment and scale
 
+Status: performance preview `0.4.0-m2` is published. Long-session layer
+compaction and the regression round are on the pending merge candidate.
+
 - Network policy via seccomp user notification or Landlock ABI 4+ where the
   kernel supports it.
-- Read-only cache bind mounts for Cargo/npm/pip caches so sandboxed installs do
-  not re-download gigabytes.
+- [x] Long-session physical layer compaction with logical DAG, diff, rollback,
+  branching, and commit semantics preserved.
 - 200k-file benchmark fixtures, first-round wall-clock measurements, and
   parallel first-session manifest capture.
-- Benchmark regression tracking on a dedicated runner.
+- [x] Benchmark regression tracking with a fixed release binary, 20 samples,
+  one warm-up, long-session boundaries, and measured disk growth.
 - Blocked-write audit counters (requires an interception layer, not Landlock
   alone).
 - Better `doctor` diagnostics for AppArmor, WSL config, and filesystem quirks.

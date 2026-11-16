@@ -94,6 +94,9 @@ It must be outside the workspace and on an xattr-capable Linux filesystem.
         ├── home/                        # redirected HOME
         ├── tmp/                         # redirected TMPDIR
         ├── cache/                       # redirected caches
+        ├── layers/
+        │   ├── compacted/<key>/         # validated physical mount-layer cache
+        │   └── tmp/                     # unpublished compaction attempts
         ├── events.jsonl                 # run/rollback/commit/discard audit
         ├── lock                         # flock for workspace mutation
         └── commit/<journal>/            # phase meta, ops, copy + link backups
@@ -159,6 +162,40 @@ userxattr
 The lower layers are ordered topmost-first. The base workspace remains the live
 host directory. That is why the host must be treated as read-only while a
 session is active.
+
+### Layer compaction
+
+The DAG remains entirely logical. Compaction changes only the physical lower
+layers passed to OverlayFS when the active branch approaches the 150-layer or
+3800-byte `lowerdir` limit.
+
+Before creating a step, core scans existing compaction metadata and reuses a
+compacted layer only when its recorded logical source list is an exact prefix of
+the active root-to-head chain. When another compaction is required, core:
+
+1. selects the oldest contiguous prefix and keeps up to 32 recent logical
+   layers uncompressed;
+2. replays only those upper layers, using the base manifest to distinguish
+   additions, modifications, type changes, and deletions;
+3. materializes the net result in `layers/tmp/`, normalizing whiteouts to
+   `user.overlay.whiteout`, preserving opaque directories, modes, symlinks,
+   `user.*` xattrs, and hardlink groups;
+4. analyzes the temporary result again and compares namespace semantics,
+   content hashes, metadata, xattrs, whiteouts, opaque directories, and
+   hardlink partitions with the source layers;
+5. writes `layer.json` with the source layer ids and base-manifest fingerprint,
+   then publishes the directory with an atomic rename.
+
+The session lock serializes compaction with other session mutations. A process
+interruption leaves either an unpublished temporary directory or a complete
+published layer; the original logical layers are never modified, so the next
+run can clean up and retry. `stats` reports logical steps, physical lower layers
+(including the live base), compacted-layer count, and allocated compacted bytes.
+Finalized sessions include compaction artifacts in normal `gc` removal.
+
+`diff` and `commit` always read `steps/<n>/upper` for the logical chain. They do
+not substitute a compacted layer, so historical rollback and branching retain
+the original per-step semantics.
 
 ## 6. Diff
 
@@ -236,9 +273,10 @@ or storage failure.
 `tracing` spans cover namespace setup, mount, Landlock, diff, and commit.
 `--trace-chrome` emits a Chrome Trace JSON file. `doctor` runs static capability
 probes (namespace, overlay, `userxattr`, Landlock ABI, state filesystem, disk
-space); the whiteout kind is confirmed by the first real run, and latency is
-measured by `scripts/bench.sh`. `stats` reports step count, rollback count,
-reaped orphans, incremental disk use, and whether network isolation is active.
+space). The whiteout kind is confirmed by the first real run, and latency is
+measured by `scripts/bench.sh`. `stats` reports logical step count, physical
+mount layers, compacted storage, rollback count, reaped orphans, incremental
+disk use, and whether network isolation is active.
 
 M1 does **not** count blocked writes: Landlock denials are silent. The field is
 reported as not instrumented rather than invented.
@@ -266,3 +304,4 @@ wrapper over `wsl.exe`) is M3. For M1:
 | Host file changed during session | commit conflict; `--force` still backs up |
 | Commit interrupted | journal restore; manual recovery path if restore fails |
 | Whiteout format differs from expectation | both char-device and xattr forms supported |
+| Layer compaction interrupted | originals untouched; temporary output is discarded and retried |

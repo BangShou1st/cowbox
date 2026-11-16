@@ -20,10 +20,10 @@
 </div>
 
 > [!IMPORTANT]
-> cowbox is an **M1.5 preview**. The engine targets Linux and WSL2; Windows ships
-> a native launcher that delegates into WSL. MCP proxying, a native Windows
-> file-edit backend, macOS support, and network isolation are later milestones.
-> See [docs/ROADMAP.md](docs/ROADMAP.md) for the staged plan.
+> cowbox is an **M2 performance preview**. The engine targets Linux and WSL2;
+> Windows ships a native launcher that delegates into WSL. MCP proxying, a
+> native Windows file-edit backend, macOS support, and network isolation are
+> later milestones. See [docs/ROADMAP.md](docs/ROADMAP.md) for the staged plan.
 
 ## Why cowbox
 
@@ -55,7 +55,7 @@ cowbox commit                # atomically apply the net changes to the host
 cowbox commit --recover      # reconcile an interrupted commit (restore or finish)
 cowbox discard               # throw the sandbox state away
 cowbox doctor                # check kernel, OverlayFS, xattr, Landlock
-cowbox stats                 # inspect steps, rollbacks, orphans, disk use
+cowbox stats                 # inspect logical steps, mount layers, disk use
 cowbox sessions              # list active and finalized sessions across projects
 cowbox gc --dry-run          # preview old session state that can be removed
 ```
@@ -88,6 +88,11 @@ Chrome Trace JSON of namespace, mount, diff, and commit spans.
 - Every step gets a writable **upperdir** on the WSL/Linux ext4 filesystem.
 - A step is frozen by dropping the mount; the next step stacks the previous
   upper layers below its own upperdir.
+- Long sessions compact old physical mount layers while retaining every logical
+  DAG step. Compression is derived from upper layers plus the base manifest,
+  validated in a temporary directory, and published atomically. `diff`,
+  `commit`, rollback, and branching continue to use the original logical
+  layers.
 - `rollback` is a DAG head-pointer move. The old layers stay available for
   audit and for branching.
 - `commit` computes the net diff from the base, checks for host drift, backs up
@@ -199,6 +204,14 @@ shows their disk use, and `cowbox gc` removes finalized sessions older than
 seven days. Active sessions are never deleted. Use `--all` to ignore the age
 threshold, `--dry-run` to preview, and `--yes` for non-interactive execution.
 
+### Long sessions
+
+Sessions that cross the physical layer or lowerdir-length limit compact the
+oldest part of the active ancestor chain automatically and keep the most recent
+layers uncompressed. `cowbox stats` reports both logical steps and the physical
+mount count, plus compacted-layer storage. A compaction cache is reused only
+when its recorded source list is an exact prefix of the current branch.
+
 ## Safety model
 
 - cowbox M1 uses **Landlock ABI 3** for path-based read/write fencing and a
@@ -207,7 +220,7 @@ threshold, `--dry-run` to preview, and `--yes` for non-interactive execution.
   lowerdir is the live workspace, so external edits are detected at commit time
   through a base manifest; `cowbox commit` refuses by default and `--force`
   still takes a backup.
-- M1 does **not** isolate the network. A process inside the sandbox can bind
+- cowbox does **not** isolate the network. A process inside the sandbox can bind
   host ports and make network connections. Network policy is planned for M2.
 - M1 is a guard against **accidental damage and agent mistakes**, not a
   hardened sandbox for hostile code. Kernel exploits and deliberately malicious
@@ -261,7 +274,7 @@ instrumented yet.
 | --- | --- | --- |
 | **M1** | Linux/WSL2 CLI, snapshot DAG, OverlayFS, Landlock, commit journal, tests, benchmarks | Preview available |
 | **M1.5** | Windows launcher, `setup`, multi-harness skill installer, project rules and policy | Preview available |
-| **M2** | Network policy (seccomp or newer Landlock), cache bind mounts, 200k-file benchmarks, blocked-write auditing | In progress |
+| **M2** | Long sessions, performance work, 200k-file benchmarks | Performance preview available; cache candidate pending merge |
 | **M3** | MCP proxy with `cowbox_diff` / `cowbox_rollback` / `cowbox_commit` meta-tools | Planned |
 | **M4** | Native Windows ReFS + Job Object backend, macOS backend, eval suite and public leaderboard | Planned |
 

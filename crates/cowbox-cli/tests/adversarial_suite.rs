@@ -1480,6 +1480,70 @@ fn trace_chrome_writes_a_parseable_trace() {
 }
 
 #[test]
+fn long_session_compacts_mount_layers_and_preserves_logical_diff() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    fs::write(env.workspace.path().join("modify.txt"), "old\n").expect("modify fixture");
+    fs::write(env.workspace.path().join("delete.txt"), "remove\n").expect("delete fixture");
+    fs::create_dir_all(env.workspace.path().join("nested")).expect("nested fixture");
+    fs::write(env.workspace.path().join("nested/keep.txt"), "keep\n").expect("nested file");
+    env.init();
+
+    let (code, first) = run_script(
+        &env,
+        "printf 'new\\n' > modify.txt && rm delete.txt && printf 'added\\n' > added.txt",
+    );
+    assert_eq!(code, 0, "mutation run failed: {first}");
+    let (code, before) = env.json(&["diff", "--json"]);
+    assert_eq!(code, 0, "diff before compaction failed: {before}");
+    let before_changes = before["data"]["changes"].clone();
+
+    for expected in 2..=155 {
+        let (code, run) = env.json(&["run", "--json", "--", "true"]);
+        assert_eq!(code, 0, "long-session step {expected} failed: {run}");
+        assert_eq!(run["data"]["step"].as_u64(), Some(expected));
+    }
+
+    let (code, after) = env.json(&["diff", "--json"]);
+    assert_eq!(code, 0, "diff after compaction failed: {after}");
+    assert_eq!(
+        after["data"]["changes"], before_changes,
+        "compaction changed the logical diff"
+    );
+    let (code, stats) = env.json(&["stats", "--json"]);
+    assert_eq!(code, 0, "stats failed: {stats}");
+    assert_eq!(stats["data"]["logical_steps"].as_u64(), Some(155));
+    assert_eq!(stats["data"]["compact_layers"].as_u64(), Some(1));
+    assert!(
+        stats["data"]["mounted_layers"]
+            .as_u64()
+            .is_some_and(|layers| layers < 50),
+        "physical mount count was not reduced: {stats}"
+    );
+    let (code, view) = run_script(
+        &env,
+        "test ! -e delete.txt && test -f added.txt && test \"$(cat modify.txt)\" = new",
+    );
+    assert_eq!(code, 0, "compacted sandbox view diverged: {view}");
+
+    let (code, rollback) = env.json(&["rollback", "100", "--json"]);
+    assert_eq!(
+        code, 0,
+        "rollback before compacted prefix failed: {rollback}"
+    );
+    let (code, branch) = env.json(&["run", "--json", "--", "true"]);
+    assert_eq!(code, 0, "branch run failed: {branch}");
+    let (code, branched_diff) = env.json(&["diff", "--json"]);
+    assert_eq!(code, 0, "branched diff failed: {branched_diff}");
+    assert_eq!(
+        branched_diff["data"]["changes"], before_changes,
+        "branching from the old snapshot did not preserve the logical diff"
+    );
+}
+
+#[test]
 fn nine_p_smoke_is_opt_in_and_cleans_up() {
     if std::env::var("COWBOX_TEST_9P").as_deref() != Ok("1")
         || !Path::new("/mnt/e/project").is_dir()

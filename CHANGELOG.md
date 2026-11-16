@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Automatic physical layer compaction for long sessions. The logical snapshot
+  DAG remains unchanged while older contiguous ancestor layers are merged at
+  the 150-layer or lowerdir-length boundary. Compaction preserves char-device
+  and xattr whiteouts, opaque directories, type changes, symlinks, `user.*`
+  xattrs, and hardlink groups; validates in a temporary directory; and publishes
+  under an atomic rename. Reuse requires an exact source-prefix match on the
+  active branch. `stats` now reports logical steps, mounted layers, compacted
+  layer count, and compacted storage.
+### Changed
+
+- `cowbox stats` preserves the existing `steps` field and adds `logical_steps`,
+  `mounted_layers`, `compact_layers`, and `compacted_bytes`.
+- Session disk accounting includes compaction artifacts, and finalized sessions
+  include them in normal `gc` removal.
+
 ## [0.4.0-m2] - 2026-11-16
 
 ### Added
