@@ -121,7 +121,8 @@ A commit binds the session, step, host baseline, and preview target:
 3. Existing bytes are copied into a journal backup with SHA-256 verification.
 4. Removed paths are deleted in reverse depth order, new directories are
    created top-down, and files are written through a same-directory temp file
-   followed by a `MoveFileEx`-backed rename.
+   followed by a `MoveFileEx`-backed rename. A busy delete or replace restores
+   the original read-only attribute before returning the error.
 5. Before each operation the host path is re-checked. A mid-commit edit is
    copied to `conflicts/`, already-applied operations are restored from
    backups, and the user's conflicting file is left in place.

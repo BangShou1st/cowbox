@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.2-m4] - 2026-11-17
+
+### Fixed
+
+- A failed deletion of a busy read-only host file now restores the read-only
+  attribute. Retrying after the holding handle closes deletes the file.
+- Replacement failures use the same explicit attribute-restoration helper, so
+  both delete and replace errors leave the host attribute policy unchanged.
+
+### Tests
+
+- Added a busy read-only deletion regression. The native Windows suite now has
+  19 tests.
+
 ## [0.7.1-m4] - 2026-11-16
 
 ### Fixed

@@ -3,7 +3,7 @@ use super::model::*;
 use super::paths;
 use super::scan;
 use super::session::WinSession;
-use super::store::clear_readonly;
+use super::store::{clear_readonly, set_readonly};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -770,9 +770,18 @@ fn apply_ops(
             }
             WinOpKind::DeleteFile => {
                 if host_path.exists() {
+                    let readonly = journal
+                        .backups
+                        .get(&op.rel_path)
+                        .map(|backup| backup.readonly)
+                        .unwrap_or(fs::metadata(&host_path)?.permissions().readonly());
                     clear_readonly(&host_path)?;
-                    fs::remove_file(&host_path)
-                        .map_err(|error| busy_or_io("cannot remove", &host_path, error))?;
+                    if let Err(error) = fs::remove_file(&host_path) {
+                        if host_path.exists() {
+                            let _ = set_readonly(&host_path, readonly);
+                        }
+                        return Err(busy_or_io("cannot remove", &host_path, error));
+                    }
                 }
             }
             WinOpKind::DeleteDir => {
@@ -896,19 +905,22 @@ fn write_file_atomic(
         permissions.set_readonly(op.readonly);
         fs::set_permissions(&temp, permissions)?;
         let destination_was_file = destination.is_file();
+        let destination_readonly = if destination_was_file {
+            fs::metadata(destination)?.permissions().readonly()
+        } else {
+            false
+        };
         if destination_was_file {
             clear_readonly(destination)?;
         }
         if let Err(error) = fs::rename(&temp, destination) {
             if destination_was_file && destination.is_file() {
-                if let Some(backup) = journal.backups.get(&op.rel_path) {
-                    if let Ok(mut permissions) =
-                        fs::metadata(destination).map(|metadata| metadata.permissions())
-                    {
-                        permissions.set_readonly(backup.readonly);
-                        let _ = fs::set_permissions(destination, permissions);
-                    }
-                }
+                let readonly = journal
+                    .backups
+                    .get(&op.rel_path)
+                    .map(|backup| backup.readonly)
+                    .unwrap_or(destination_readonly);
+                let _ = set_readonly(destination, readonly);
             }
             return Err(busy_or_io("cannot replace", destination, error)
                 .hint(format!("the staged file is {}", paths::display(&temp))));
