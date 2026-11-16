@@ -21,6 +21,7 @@ pub fn delegate_if_needed(command: &CliCommand) -> Option<CliResult<i32>> {
         | CliCommand::Gc(_)
         | CliCommand::Stats(_)
         | CliCommand::McpProxy(_) => Some(delegate(command)),
+        CliCommand::Win(_) => None,
         CliCommand::McpAdapter(_) | CliCommand::SandboxExec(_) | CliCommand::Supervisor(_) => {
             Some(Err(CliError::new(
                 "INTERNAL_COMMAND",

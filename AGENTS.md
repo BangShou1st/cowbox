@@ -9,13 +9,15 @@ cowbox is a local, millisecond-latency Copy-on-Write sandbox for AI coding
 agents. The architecture is **Thick Engine, Thin Protocol**:
 
 - `crates/cowbox-core`: Linux namespaces, OverlayFS, Landlock, process
-  supervision, whiteout-aware diff, commit journal. This is the engine.
+  supervision, whiteout-aware diff, commit journal, and the native Windows
+  NTFS snapshot store. This is the engine.
 - `crates/cowbox-dag`: pure snapshot DAG. No filesystem or process access.
 - `crates/cowbox-cli`: argument parsing, session persistence, JSON/human
   rendering, hidden helper subcommands. Keep it thin.
 
-M1 is Linux/WSL2 only. MCP proxying, native Windows, macOS, network isolation,
-and multi-agent racing are later milestones and must not leak into M1 code.
+M1 is Linux/WSL2 only. M4 adds the native Windows snapshot-editing preview in
+`cowbox-core/src/win`; MCP proxying, macOS, ReFS block cloning, network
+isolation, and multi-agent racing remain separate milestones.
 
 ## 2. Non-negotiable invariants
 
@@ -56,6 +58,28 @@ and multi-agent racing are later milestones and must not leak into M1 code.
     metadata. Refuse device nodes, FIFOs, and sockets. Clear setuid/setgid bits.
 12. **No fake data.** Benchmarks, test results, and demo output must be
     reproducible. "TBD" is acceptable; invented numbers are not.
+13. **Windows storage is explicit.** The native backend uses
+    `ntfs_materialized_copy`. Report that mode in doctor/init JSON; never imply
+    NTFS block cloning. Refuse non-NTFS source or state volumes.
+14. **Windows traversal is no-follow.** Walk with `symlink_metadata` and refuse
+    symlinks, junctions, and reparse points. Verify every write path stays
+    inside the declared workspace or session root.
+15. **Windows commit is journaled.** Bind session and step, re-check the host
+    baseline under the session lock, write same-directory temp files, use a
+    persisted `applied` phase as the commit point, and retain backups until the
+    host restore or session finalization is persisted. Preserve mid-commit user
+    bytes under the journal's `conflicts/` directory.
+16. **Windows snapshots are incremental.** Import once into a content-addressed
+    object store; checkpoints use `cowbox-dag` and store only changed entries.
+    Diff reads the DAG. Do not rescan the host as a shortcut for snapshot
+    content.
+17. **Windows file fidelity is explicit.** Preserve read-only attributes and
+    ADS on modified files. Refuse modified hardlinks, explicit ACL replacement,
+    device files, and reparse points before write-back. `.git` is never
+    imported or committed.
+18. **Windows recovery is testable.** Keep deterministic fault injection for
+    interrupted apply, interrupted recovery, mid-commit host edits, and wrong
+    sessions. A skipped recovery test is not a passing recovery test.
 
 ## 3. Linux implementation notes
 
@@ -75,6 +99,23 @@ and multi-agent racing are later milestones and must not leak into M1 code.
 - Redirect `HOME`, `TMPDIR`, `XDG_CACHE_HOME`, `CARGO_HOME`, and cache variables
   into the session directory when cache isolation is enabled.
 
+### Windows native notes
+
+- `cowbox win` runs natively and must not delegate to `wsl.exe`. Existing
+  `run|diff|log|rollback|commit|mcp-proxy` commands keep their WSL delegation.
+- The session lives under `<state-root>/win/sessions/<id>` and contains a
+  `current` junction, generation directories, `base.json`, per-step deltas,
+  content-addressed objects, a session lock, and commit journals.
+- Use `junction::delete` followed by removing the leftover empty directory
+  before recreating a junction. A busy `current` path may fall back to a
+  returned `workspace-<n>` path; never report a stale path as live.
+- Replace existing files by copying the host file into the same-directory temp
+  first (preserves ADS), truncating and writing the object bytes, verifying the
+  hash, then renaming. Clear read-only only around the replacement and restore
+  the target attribute.
+- Explicit DACL entries are detected with `windows-acl`; inherited ACLs are
+  allowed. Hardlink counts come from `winapi-util` file information.
+
 ## 4. Repository and build rules
 
 - Source may live under `/mnt/e/project/cowbox` while explicitly requested, but
@@ -83,6 +124,9 @@ and multi-agent racing are later milestones and must not leak into M1 code.
 - Integration fixtures must be created under `/tmp` (ext4), never under
   `/mnt/e` or another 9p mount.
 - Keep the state root outside the workspace and on an xattr-capable filesystem.
+- Windows builds and tests use one NTFS target directory on D: and disposable
+  fixtures outside the source tree. Do not create Windows target directories
+  under `E:\project`.
 - All source files use LF. `.gitattributes` enforces it.
 - Public APIs live in `cowbox-core/src/model.rs`, `cowbox-core/src/lib.rs`, and
   `cowbox-dag/src/lib.rs`. Change them deliberately, update all call sites, and
@@ -100,6 +144,11 @@ Before claiming a task is complete:
    `bash scripts/smoke.sh` (`init → run → diff → rollback → commit --dry-run`).
 6. If you touched the engine, run the relevant Criterion benchmark and update
    `docs/BENCHMARKS.md` with measured values only.
+7. On Windows, also run:
+   `cargo clippy -p cowbox-cli --bin cowbox -- -D warnings`,
+   `cargo test -p cowbox-cli --test win_native -- --test-threads=1`, and
+   `py -3 scripts/acceptance_win_native.py ...` for 1k/10k and cross-volume
+   acceptance.
 
 Tests that require namespaces must fail loudly in CI when the capability is
 missing. A skipped security test is not a passing security test.
@@ -110,14 +159,13 @@ Code, comments, commit messages, and public documentation are English. When
 reporting to the maintainer in chat, use Chinese. Keep reports factual: files
 changed, commands run, tests observed, risks remaining.
 
-## 7. M1 boundaries
+## 7. Milestone boundaries
 
-- No MCP proxy or meta-tools in M1.
-- No native Windows backend or `cowbox.exe` bridge in M1.
-- No macOS backend in M1.
-- No network namespace or seccomp network policy in M1.
-- No multi-agent `race` command in M1.
-- No Eval leaderboard in M1.
+- M1 excludes MCP proxy, native Windows, macOS, network namespace policy, the
+  multi-agent `race` command, and the eval leaderboard.
+- M4 currently ships only the native Windows NTFS materialized-copy preview.
+  ReFS block cloning, Job Object process tracking, macOS, and the eval
+  leaderboard remain roadmap items.
 
 Document these as roadmap items rather than implementing partial versions that
 look finished.
@@ -132,5 +180,7 @@ look finished.
   `commit` always requires human approval.
 - Project rules are idempotent marker blocks in `AGENTS.md`, `CLAUDE.md`, and
   `.cursor/rules/cowbox.mdc`; preserve content outside the markers.
-- M1.5 covers commands routed through cowbox. Codex Desktop's built-in file
-  editor is not protected until the native Windows backend lands.
+- Commands routed through cowbox are covered by the Linux/WSL2 engine. Codex
+  Desktop's built-in editor is covered only when it is opened on the managed
+  workspace returned by `cowbox win init`/`rollback`. Editing the original host
+  project directly is outside the preview boundary.

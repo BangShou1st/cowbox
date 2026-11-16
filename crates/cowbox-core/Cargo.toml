@@ -26,6 +26,14 @@ walkdir.workspace = true
 landlock.workspace = true
 rustix.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+cowbox-dag = { path = "../cowbox-dag" }
+fs2.workspace = true
+junction.workspace = true
+sysinfo.workspace = true
+winapi-util.workspace = true
+windows-acl.workspace = true
+
 [dev-dependencies]
 cowbox-dag = { path = "../cowbox-dag" }
 criterion.workspace = true

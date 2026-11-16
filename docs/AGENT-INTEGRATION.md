@@ -186,7 +186,28 @@ session ends; start a new proxy for a new session.
 `AGENTS.md`, `CLAUDE.md`, and `.cursor/rules/cowbox.mdc`. Existing text outside
 the markers is preserved; `--remove` deletes only the managed blocks.
 
+## Native Windows editor preview
+
+For Codex Desktop built-in editor saves, use the `cowbox win` path instead of
+the WSL command path:
+
+```powershell
+cowbox win init --workspace E:\project\app --state-root D:\cowbox-state\app --json
+# Point the editor at data.managed_workspace.
+cowbox win checkpoint --session <id>
+cowbox win diff --session <id>
+cowbox win rollback <step> --session <id>
+cowbox win commit --dry-run --session <id>
+cowbox win commit --session <id>
+```
+
+The managed directory is a normal NTFS workspace. The preview protects the
+journaled write-back to the original project; it does not isolate the editor
+process, network access, or reads outside that directory. The agent must keep
+the user's original project read-only until the human approves the commit.
+
 ## Not in this milestone
 
-The proxy supports stdio tool servers only. Codex Desktop built-in edits remain
-outside the WSL sandbox until the native Windows backend lands.
+The proxy supports stdio tool servers only. Codex Desktop built-in edits are
+covered only when the editor is opened on a `cowbox win` managed workspace;
+the original host project remains outside the snapshot until write-back.

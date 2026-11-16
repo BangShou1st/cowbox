@@ -20,10 +20,11 @@
 </div>
 
 > [!IMPORTANT]
-> cowbox 目前是 **M3 Agent 快照预览版**。引擎运行在 Linux/WSL2，Windows 提供原生
-> 启动器并委托到 WSL。`mcp-proxy` 将 stdio MCP server 的每次工具调用变成可检查、
-> 可回滚的 cowbox step。Windows 原生文件编辑后端和 macOS 属于后续里程碑。
-> 分阶段计划见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+> cowbox 目前是 **M4 Windows 原生快照编辑预览版**。Linux/WSL2 引擎与 MCP 代理
+> 保持不变；`cowbox win` 新增 NTFS 物化会话，供 Codex Desktop 等编辑器使用，
+> 支持 checkpoint、diff、rollback 与人工确认的日志化写回。它保护文件写回边界，
+> 不是进程或网络沙盒。macOS 与 ReFS 块克隆后端属于后续里程碑。计划见
+> [docs/ROADMAP.md](docs/ROADMAP.md) 与 [docs/WINDOWS.md](docs/WINDOWS.md)。
 
 ## 为什么需要 cowbox
 
@@ -60,6 +61,8 @@ cowbox stats                 # 查看逻辑步数、实际挂载层、磁盘占�
 cowbox sessions              # 列出所有项目的 active 与 finalized session
 cowbox gc --dry-run          # 预览可清理的旧 session 状态
 cowbox mcp-proxy -- <server> # 让 stdio MCP server 的每次调用都经过 cowbox 快照
+cowbox win init ...          # 为原生 Windows 编辑器创建受管工作区
+cowbox win checkpoint|diff|rollback|commit
 ```
 
 所有命令支持 `--json`；`run` 还支持 `--trace-chrome` 导出 namespace、mount、
@@ -141,6 +144,26 @@ cowbox run -- <command>
 
 `init --agent` 会写 `.cowbox.toml`，以及 AGENTS.md、CLAUDE.md、Cursor 规则块。
 默认触发模式是 `ask`，可用 `cowbox policy --json` 查看。
+
+### Windows 原生快照编辑
+
+`cowbox win` 不经过 WSL，在 Windows 上以明确的 NTFS 物化模式导入项目，再用同一
+套 DAG 与日志化写回保护编辑器保存：
+
+```powershell
+cowbox win doctor --workspace E:\project\app --state-root D:\cowbox-state\app --json
+cowbox win init --workspace E:\project\app --state-root D:\cowbox-state\app --json
+# 用 Codex Desktop 打开 data.managed_workspace 并保存编辑
+cowbox win checkpoint --session <id>
+cowbox win diff --session <id>
+cowbox win rollback <step> --session <id>
+cowbox win commit --dry-run --session <id>
+cowbox win commit --session <id>
+```
+
+初次导入按约两倍源文件大小预估；后续 checkpoint 只保存变更对象和很小的 DAG
+delta。硬链接被修改时会拒绝，reparse point 拒绝，只读文件与 ADS 保真，显式 ACL
+在替换前拒绝。完整支持表与恢复语义见 [docs/WINDOWS.md](docs/WINDOWS.md)。
 
 ## WSL2 快速开始
 
@@ -338,6 +361,9 @@ python3 scripts/offline_workflow.py \
   记录与 active 指针清除均已持久化之后。恢复发现受影响路径被外部修改时会报错并
   保留备份材料。这里保证的是进程中断恢复，不包括断电或存储故障保证。
 - 只保留 `user.*` xattr；其他 xattr 命名空间由内核或安全模块管理，不会被改写。
+- 原生 `cowbox win` 只保护其受管工作区，并通过 `win commit` 写回原项目；不隔离
+  进程、网络或目录外读取。显式 ACL、硬链接修改和 reparse point 会在写回前明确
+  拒绝，而不是静默降级。
 - 宿主缓存只读且只暴露缓存数据目录；会话写入 copy-up 到会话缓存。
 - `.git` 永远不提交，即使使用 `--include-excluded`。device、FIFO、socket 拒绝提交；
   setuid/setgid 位在 commit 时清除。
@@ -348,6 +374,12 @@ python3 scripts/offline_workflow.py \
 ## 基准测试
 
 只发布真实机器上测出的数字。测试方法与脚本见 [docs/BENCHMARKS.md](docs/BENCHMARKS.md)。
+
+`0.7.0-m4` Windows 原生预览在 10,000 文件 NTFS fixture 上实测：初次导入
+58.87 s、checkpoint 0.91 s、diff 0.90 s、rollback 8.34 s、3 文件提交 3.06 s。
+单个小文件 checkpoint 增长 689 B；连续 10 次小改动每次增长 737–743 B；
+`win discard` 实际释放 52,817 B。E 盘项目到 D 盘状态的跨卷 init/checkpoint/
+commit 为 28.8/31.8/34.8 ms。这些是物化复制模式的数字，不是 OverlayFS 延迟。
 
 最终 M2 离线执行轮在 WSL2 ext4 上比较合并基线 `29af7e7` 与网络策略/离线候选
 `fb4dad0`，
@@ -383,7 +415,7 @@ python3 scripts/offline_workflow.py \
 | **M1.5** | Windows 启动器、`setup`、多 harness skill 安装、项目规则与策略 | 预览可用 |
 | **M2** | 长会话、网络策略、离线诊断/工作流、只读宿主缓存、20 万文件基准 | 预览可用 |
 | **M3** | MCP 快照代理、diff/rollback/commit 控制工具、真实 harness 工作流 | 预览可用 |
-| **M4** | Windows 原生 ReFS + Job Object 后端、macOS 后端、Eval 套件与公开榜单 | 计划中 |
+| **M4** | Windows 原生 NTFS 快照编辑（预览）、ReFS + Job Object 后端、macOS 后端、Eval 套件与公开榜单 | Windows 预览可用 |
 
 M1 明确不包含 MCP、Windows 原生、macOS、网络隔离和多 Agent 赛马。M2 增加可选
 网络命名空间隔离，但不宣称包过滤或恶意代码隔离。M3 为工具型 stdio MCP server

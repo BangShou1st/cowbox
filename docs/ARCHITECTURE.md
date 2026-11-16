@@ -6,8 +6,8 @@ cowbox makes local workspace mutations by an AI coding agent cheap to inspect
 and cheap to reverse. It does this without a VM, without a container image, and
 without replacing the developer's toolchain.
 
-The M3 design retains the M2 engine and adds a protocol layer with six
-properties:
+The M4 design retains the M2/M3 engine and adds a native Windows snapshot store
+with seven properties:
 
 1. **Millisecond setup.** The workspace is a read-only lowerdir; each step adds
    a writable upperdir on ext4.
@@ -22,11 +22,16 @@ properties:
 6. **Agent-visible snapshots.** A stdio MCP proxy makes every upstream tool call
    a real cowbox step and reserves control tools for diff, rollback, and commit
    preview.
+7. **Native Windows editor protection.** `cowbox win` materializes an NTFS
+   workspace, checkpoints editor saves in `cowbox-dag`, and writes back only a
+   reviewed step through a journaled, session-bound commit.
 
-## 2. Non-goals for M3
+## 2. Non-goals for this preview
 
 - Selective destination filtering or packet-level network policy.
-- A native Windows or macOS backend.
+- ReFS block cloning, Job Object process tracking, or native Windows process
+  isolation. The Windows preview is a file-write-back guard.
+- A macOS backend.
 - HTTP/SSE MCP upstream transport, resources, prompts, or a long-lived upstream
   MCP process.
 - MCP content inspection, policy rewriting, or hostile-server isolation beyond
@@ -44,10 +49,10 @@ properties:
                 │                                 │
 ┌───────────────▼─────────────────┐  ┌────────────▼──────────────┐
 │ cowbox-core                     │  │ cowbox-dag                │
-│ LinuxBackend                    │  │ StepNode / SessionDag     │
+│ LinuxBackend · WinStore         │  │ StepNode / SessionDag     │
 │ namespaces · OverlayFS          │  │ rollback · undo · branch  │
 │ Landlock · supervisor           │  │ validation · serde        │
-│ diff · commit journal           │  └───────────────────────────┘
+│ NTFS objects · win journal      │  └───────────────────────────┘
 └───────────────┬─────────────────┘
                 │
 ┌───────────────▼─────────────────────────────────────────────────┐
@@ -120,6 +125,23 @@ It must be outside the workspace and on an xattr-capable Linux filesystem.
 A session is `Active`, `Committed`, or `Discarded`. Only one active session is
 allowed per workspace in M2. After a successful commit the active pointer is
 cleared; the next `run` creates a new session whose base is the updated host.
+
+Native Windows sessions use a separate layout:
+
+```text
+<state-root>/win/sessions/<id>/
+├── session.json                 # DAG, status, live/editor workspace
+├── base.json                    # full base manifest
+├── steps/<n>.json               # changed entries only
+├── objects/<sha[..2]>/<sha[2..]># content-addressed files
+├── generations/gen-<n>/         # materialized managed workspaces
+├── current                      # junction to the live generation
+├── commits/journal-<id>/        # journal + backups + conflicts
+└── lock
+```
+
+The Windows store never claims CoW. `doctor` and `init` report
+`ntfs_materialized_copy`; checkpoints add only changed objects and a delta.
 
 ## 5. Run lifecycle
 
@@ -504,3 +526,30 @@ MCP JSON-RPC stream is neither decoded nor buffered:
 | MCP client disconnects mid-call | kill the sandbox process tree; proxy exits |
 | MCP tool name conflicts with a reserved control | `tools/list` returns `MCP_TOOL_NAME_CONFLICT` |
 | MCP call times out | step is recorded; result includes rollback metadata |
+
+## 12. Native Windows snapshot editing
+
+`cowbox win` is a second platform implementation, not a translation layer over
+the Linux engine:
+
+- **Import.** Walk the source with `symlink_metadata`, refuse reparse points,
+  exclude VCS/generated directories, hash regular files, and check free space.
+  Materialize a managed generation and a content-addressed object store.
+- **Checkpoint.** Scan the managed generation, diff it against the current DAG
+  head, store changed objects, and append a delta whose parent is the head.
+- **Rollback.** Save uncheckpointed edits as a rescue step, materialize the
+  target manifest into a new generation, move the head only after the new tree
+  exists, then update the `current` junction. A busy junction falls back to a
+  returned live generation path.
+- **Commit.** Compute the base-to-target diff, scan the original host for drift,
+  journal backups and operations, apply deletes/directories/files with
+  per-operation host checks, verify the target, then persist the `applied`
+  phase. Recovery restores before that phase and finalizes at or after it.
+- **Fidelity.** Read-only attributes and ADS survive replacement. Hardlink
+  modification, explicit ACL replacement, and reparse points fail before
+  write-back with actionable errors.
+
+The session lock serializes checkpoint, rollback, commit, and discard. Commit
+journals store the session id, step, base and target manifest hashes, backups,
+applied-op count, conflicts, and phase. This is the same commit-point discipline
+as the Linux engine, adapted to Windows file replacement.

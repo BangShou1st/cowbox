@@ -30,6 +30,47 @@ retained first-run source snapshot. That snapshot's build matches
 `ab9a2adcd4862a1505f4b60596d2ff76d4aa957a98d7ed390592c7f7ab387961`.
 All values below are measured output, not targets or estimates.
 
+## Windows native snapshot editing (`0.7.0-m4`)
+
+Measured on 2026-11-16 with the local release binary
+`a17fe447516ae8861298a09992d5561178dc085a2e834b3735bea48ae1e5a127`
+on Windows 11 Home (10.0.26200, NTFS, SSDs, non-administrator shell). The
+source fixture was generated below `D:\cowbox-accept\perf-run2`; the
+cross-volume fixture used an `E:` project and a `D:` state root. The raw JSON
+was `D:\cowbox-accept\acceptance-win-native-0.7.0-m4.json`
+(SHA-256 `25e9f6f7a1d84f0987459f9e449fbe3b3a1a74dcfc39305c907de6ce4ba951d1`).
+Wall-clock values are one run of the checked-in acceptance script; this is a
+materialized-copy preview, not an OverlayFS latency claim.
+
+| Operation | 1,000 files | 10,000 files |
+| --- | ---: | ---: |
+| `win init` (copy + hash + verify) | 6,411.586 ms | 58,871.985 ms |
+| `win checkpoint` after 1 changed file | 126.981 ms | 913.317 ms |
+| `win diff` (1 change vs base) | 174.418 ms | 900.939 ms |
+| `win rollback` to base | 978.649 ms | 8,341.429 ms |
+| `win commit` of 3 files | 407.051 ms | 3,056.233 ms |
+
+Initial state size was 307,329 bytes for 1k files and 2,926,332 bytes for
+10,000 files. A checkpoint with one changed small file grew state by 689 bytes
+at both sizes.
+
+Continuous-growth check (100-file fixture):
+
+| Step | State bytes | Growth |
+| --- | ---: | ---: |
+| 0 | 45,441 | - |
+| 1-9 | 46,178 to 52,074 | 737 bytes per step |
+| 10 | 52,817 | 743 bytes |
+
+`win discard` reported and actually released 52,817 bytes; the session state
+directory was empty afterward. Cross-volume `E:` project to `D:` state root:
+init 28.790 ms, checkpoint 31.797 ms, commit 34.785 ms for a 3-file fixture.
+
+Free space recorded by the same run (bytes): C: 18,872,565,760 before /
+18,877,222,912 after; D: 199,637,368,832 before / 199,617,085,440 after;
+E: 14,851,477,504 before / 14,851,477,504 after. The D: delta is the retained
+1k/10k/growth state; E: held only the small source fixture.
+
 INVALID candidate (do not use for performance claims) at
 `/home/bangshou/cowbox-bench-results/cowbox-m2-candidate-final.json`
 (raw SHA-256
