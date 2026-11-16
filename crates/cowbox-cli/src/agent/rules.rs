@@ -79,7 +79,8 @@ reported host drift.
 If cowbox MCP tools are configured, use the upstream file tools for edits and
 inspect `_meta.cowbox` after each call. Use `cowbox_diff` before retrying and
 `cowbox_rollback` to discard a bad step. `cowbox_commit` only previews; the user
-must run `cowbox commit --step <n>` in a terminal and approve it.
+must run the returned session-bound `cowbox commit --step <n> --session <id>`
+command in a terminal and approve it.
 
 cowbox protects local workspace files. The default network policy is `host`;
 `--network off` isolates IPv4/IPv6 TCP/UDP connectivity but does not reverse
