@@ -902,6 +902,111 @@ Final Criterion values from the lower-load rerun:
 | `criterion.log` | `4506d2cc7fd824ccd49d733e518cc7287dedde33a6cdec64dd1cd0f3d9f921dc` |
 | `criterion-rerun.log` | `93629366a87c138a234344b69cb7007d5495152b018840602fb75ea933602d29` |
 
+## M2 permission-transaction hardening
+
+This round measured the release binary built from the working tree based on
+`ab14bccc4986a71c72475f20b0988b1dab255ffa`. The binary SHA-256 was
+`94e6b077eed2a5b666855736a90c9179d204b80c8510694f0ce2fbcdd0e4a53d`.
+All timings used the same WSL2 instance, ext4 filesystem, release profile,
+serial execution, 20 measured samples, and one excluded warm-up per scenario.
+No sample was removed or winsorized.
+
+### Full harness
+
+Cells are median / P95 milliseconds.
+
+| Scenario | Files | Release candidate |
+| --- | ---: | ---: |
+| First run | 10,000 | **31.91 / 44.82** |
+| One parent layer | 10,000 | **28.50 / 31.53** |
+| 10-file diff | 10,000 | **10.81 / 17.89** |
+| First run | 200,000 | **120.47 / 134.63** |
+| One parent layer | 200,000 | **26.24 / 29.82** |
+| 10-file diff | 200,000 | **88.40 / 99.21** |
+
+The fixed one-parent step measured 30.07 / 33.17 ms after a 37.74 ms untimed
+preparation step.
+
+### Populated compaction
+
+A fresh session created 10,000 entries in step 1, then advanced through 149
+empty steps. Step 151 triggered the first compaction. Preparation, including
+all 150 previous steps, took 6,609.68 ms and was excluded from the compaction
+measurement.
+
+| Metric | Value |
+| --- | ---: |
+| Upper entries | 10,000 |
+| Compaction step 151 | **471.62 ms** |
+| Mounted layers after compaction | 35 |
+| Compacted layers | 1 |
+| Reported compact bytes | 41,373,696 |
+
+### Real-change acceptance
+
+`scripts/acceptance_m2.py` ran a 300-step real-change session with a debug
+binary so deterministic crash injection was available. The fixture covered
+whiteouts, an opaque directory, directory-to-file and file-to-directory
+changes, a symlink update, session hardlinks, `user.*` xattrs, `000` files and
+directories, rollback to step 100, branching from the old snapshot, host-drift
+refusal, a real commit, and commit recovery.
+
+| Check | Observed |
+| --- | --- |
+| Steps | 300 |
+| Diff entries before and after two compactions | 16, identical |
+| Compactions | Step 151 and step 268, 35 mounted layers after each |
+| Final layout | 67 mounted layers, 2 compacted layers, 114,688 reported bytes |
+| Rollback / branch | head 100 / next DAG step 301 |
+| Host drift | `COMMIT_CONFLICT` |
+| Commit | 16 changes applied |
+| Commit recovery | `restore_host`, 1 path restored |
+
+The acceptance JSON SHA-256 was
+`3def5fa92557937109428b013c2c4a00c1bd39340379ed4519471a4decc61717`.
+
+### Criterion
+
+The final Criterion pass recorded:
+
+| Benchmark | Lower / estimate / upper |
+| --- | --- |
+| `diff_scan/10000_files_10_changes` | 3.8025 / **3.8260** / 3.8651 ms |
+| `rollback_dag/100_steps` | 10.393 / **10.676** / 10.899 ns |
+| `run_true/10000_files_end_to_end` | 29.296 / **32.225** / 35.258 ms |
+
+`diff_scan` reported a 7.18% change against the previous stored sample. The
+reader permission scan now covers the upper layers before diffing; the
+end-to-end CLI diff still measured 10.81 / 17.89 ms at 10,000 files.
+`rollback_dag` was within Criterion's noise threshold, and `run_true` improved
+by 22.24%. The CLI harness remains the authoritative end-to-end comparison.
+
+### Verification
+
+The final tree passed:
+
+| Check | Result |
+| --- | --- |
+| `cargo fmt --check` | passed |
+| workspace Clippy with `-D warnings` | passed |
+| `cargo test --workspace` | 119 passed |
+| forced-sandbox `adversarial_suite` | 34 passed, 0 failed, sequentially |
+| `bash scripts/smoke.sh` | passed |
+
+### Artifacts
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Release binary | `94e6b077eed2a5b666855736a90c9179d204b80c8510694f0ce2fbcdd0e4a53d` |
+| `bench.json` | `875da2f489f1261a46a7c876c5fba5e8dc150f29f61bf56ce087a9d9a2fb876a` |
+| `bench.md` | `75edb5e04386cf06bfae9589961336ab50d8ea48bcffbdf68720f064b9d9ad29` |
+| `bench.log` | `0dfc117d059ede8e92bdff76e5b1e47db3a1e4de1cb042a898490dbd0a21c81f` |
+| Criterion final log | `fbe7b7f29fd69eb98306c97ea5e03ed2942aeea79fa5c09ea1e98e78d9d10c2a` |
+| Acceptance JSON | `3def5fa92557937109428b013c2c4a00c1bd39340379ed4519471a4decc61717` |
+
+Raw files are under
+`/home/bangshou/cowbox-bench-results/m2-permission-final-20261116/`.
+
 ## How to run
 
 ```bash
@@ -916,6 +1021,7 @@ bash scripts/bench-m2.sh \
   --depths 1 \
   --long-session-steps 300 \
   --long-session-file-count 100 \
+  --compaction-entries 10000 \
   --json-output "$HOME/cowbox-bench-results/cowbox-m2-diff-rerun-$stamp.json" \
   --markdown-output "$HOME/cowbox-bench-results/cowbox-m2-diff-rerun-$stamp.md"
 ```
@@ -933,6 +1039,17 @@ unexpected exit after step 151 fails the benchmark.
 
 Use `--root /tmp/cowbox-m2-run --keep` to retain fixtures and states for
 inspection. Keep output files outside the disposable benchmark root.
+
+The real-change acceptance uses a debug binary because it injects a commit
+crash:
+
+```bash
+root="$(mktemp -d /tmp/cowbox-m2-acceptance-XXXXXX)"
+python3 scripts/acceptance_m2.py \
+  --binary "$CARGO_TARGET_DIR/debug/cowbox" \
+  --root "$root" \
+  --json-output "$HOME/cowbox-bench-results/m2-acceptance-$stamp.json"
+```
 
 The Criterion microbenchmark remains available:
 

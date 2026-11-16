@@ -34,6 +34,10 @@ All notable changes to this project are documented here. The format follows
   compaction boundaries, records every step, compaction events, mounted-layer
   counts, and logical/allocated disk growth. The fixed-binary regression round
   is recorded in `docs/BENCHMARKS.md`.
+- The M2 harness can measure a compaction step after populating an upper layer
+  with a deterministic entry count, and `scripts/acceptance_m2.py` records a
+  300-step real-change session through two compactions, rollback, branching,
+  host drift, commit, and commit recovery.
 
 ### Fixed
 
@@ -52,6 +56,18 @@ All notable changes to this project are documented here. The format follows
 - Compaction temporarily records and elevates source-layer read permissions for
   `000` files and directories, then restores the original modes after validation
   or from a durable journal after interruption.
+- Nested `000` directories are now fully readable during compaction, and the
+  compacted layer is measured before temporary modes are restored.
+- Permission journals live outside the disposable compilation tree, are removed
+  only after every mode is restored, and are replayed by `diff`, `commit`
+  preview, and subsequent runs under the session lock.
+- Permission recovery restores non-directories first and directories
+  deepest-first, reopens parents that an earlier interruption restored to
+  `000`, and accepts a truncated final journal line while preserving errors for
+  genuinely malformed complete records.
+- Commit ordering now supports restrictive `000` directories and files,
+  including directory mode finalization after child writes and recovery checks
+  that cannot traverse a confirmed `000` parent.
 - The adversarial long-session view check now runs with `set -e`, so every file,
   mode, xattr, symlink, and hardlink assertion can fail CI independently.
 

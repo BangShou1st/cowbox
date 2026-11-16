@@ -198,6 +198,7 @@ fn command_diff(args: &DiffArgs) -> CliResult<i32> {
         .exit(2));
     }
     let ctx = setup()?;
+    let _lock = ctx.store.lock()?;
     let record = active_record(&ctx)?;
     let target = args.step.unwrap_or(record.dag.head_step);
     if !record.dag.nodes.contains_key(&target) {
@@ -209,7 +210,9 @@ fn command_diff(args: &DiffArgs) -> CliResult<i32> {
     let chain = target_chain(&record, target)?;
     let options = ctx.config.to_diff_options(args.all);
     let layout = ctx.store.layout(&record.session_id);
-    let changes = backend().diff_layers(&layout, &[], &chain, &options)?;
+    let backend = backend();
+    backend.recover_compaction_permissions(&layout)?;
+    let changes = backend.diff_layers(&layout, &[], &chain, &options)?;
     let summary = render::summarize(&changes);
     if args.json {
         json::print(&json::ok(
@@ -330,7 +333,9 @@ fn command_commit(args: &CommitArgs) -> CliResult<i32> {
         .config
         .to_commit_options(args.force, true, args.include_excluded);
     let layout = ctx.store.layout(&record.session_id);
-    let preview = backend().commit_layers(&layout, &chain, &preview_options)?;
+    let backend = backend();
+    backend.recover_compaction_permissions(&layout)?;
+    let preview = backend.commit_layers(&layout, &chain, &preview_options)?;
     if !preview.conflicts.is_empty() && !preview_options.force {
         let paths = preview
             .conflicts
@@ -401,7 +406,7 @@ fn command_commit(args: &CommitArgs) -> CliResult<i32> {
     let options = ctx
         .config
         .to_commit_options(args.force, false, args.include_excluded);
-    let report = backend().commit_layers(&layout, &chain, &options)?;
+    let report = backend.commit_layers(&layout, &chain, &options)?;
     if !report.conflicts.is_empty() && !options.force {
         let paths = report
             .conflicts
@@ -492,6 +497,7 @@ fn command_commit_recover(ctx: &Context, args: &CommitArgs) -> CliResult<i32> {
     }
 
     let layout = ctx.store.layout(&record.session_id);
+    backend().recover_compaction_permissions(&layout)?;
     let report = backend().recover_commit(&layout)?;
     match report.action {
         CommitRecoveryAction::RestoreHost | CommitRecoveryAction::AlreadyRolledBack => {

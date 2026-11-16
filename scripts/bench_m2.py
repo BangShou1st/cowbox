@@ -56,6 +56,12 @@ def parse_args() -> argparse.Namespace:
         help="files in the long-session fixture",
     )
     parser.add_argument(
+        "--compaction-entries",
+        type=int,
+        default=0,
+        help="upper entries for the single compaction cost probe; 0 disables it",
+    )
+    parser.add_argument(
         "--allow-legacy-layer-limit",
         action="store_true",
         help=(
@@ -94,6 +100,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--long-session-steps must be 0 or at least 152")
     if args.long_session_file_count < 100:
         parser.error("--long-session-file-count must be at least 100")
+    if args.compaction_entries < 0:
+        parser.error("--compaction-entries cannot be negative")
     return args
 
 
@@ -945,6 +953,74 @@ def probe_long_session(
     return result
 
 
+def measure_compaction_entries(
+    binary: Path,
+    bench_root: Path,
+    entries: int,
+    timeout: int,
+) -> dict[str, Any]:
+    if entries <= 0:
+        raise BenchmarkError("compaction entries must be positive")
+    workspace = bench_root / "fixtures" / "compaction-workspace"
+    if not workspace.exists():
+        workspace.mkdir(parents=True)
+        (workspace / ".git").mkdir()
+    state_base = bench_root / "sample-states" / f"compaction-{entries}"
+    state_base.mkdir(parents=True)
+    create_script = (
+        "python3 - <<'PY'\n"
+        "import os\n"
+        f"entries = {entries}\n"
+        "for index in range(entries):\n"
+        "    directory = f'd{index // 100:03d}'\n"
+        "    os.makedirs(directory, exist_ok=True)\n"
+        "    with open(f'{directory}/f{index:05d}.txt', 'w', encoding='ascii') as file:\n"
+        "        file.write(f'{index:08d} payload\\n')\n"
+        "PY"
+    )
+    with SampleState(state_base, "compaction", 0) as state:
+        invoke_json(binary, workspace, state, ["init", "--json"], timeout)
+        preparation_started = time.perf_counter_ns()
+        _first_ms, first, _process = invoke_json(
+            binary,
+            workspace,
+            state,
+            ["run", "--json", "--", "sh", "-c", create_script],
+            timeout,
+        )
+        if first.get("data", {}).get("step") != 1:
+            raise BenchmarkError(f"compaction fixture did not create step 1: {first}")
+        for expected_step in range(2, 151):
+            _step_ms, step, _process = invoke_json(
+                binary, workspace, state, ["run", "--json", "--", "true"], timeout
+            )
+            if step.get("data", {}).get("step") != expected_step:
+                raise BenchmarkError(
+                    f"compaction fixture expected step {expected_step}: {step}"
+                )
+        preparation_ms = (time.perf_counter_ns() - preparation_started) / 1_000_000
+        elapsed_ms, compaction, _process = invoke_json(
+            binary, workspace, state, ["run", "--json", "--", "true"], timeout
+        )
+        if compaction.get("data", {}).get("step") != 151:
+            raise BenchmarkError(f"compaction step was not 151: {compaction}")
+        _stats_ms, stats, _stats_process = invoke_json(
+            binary, workspace, state, ["stats", "--json"], timeout
+        )
+        data = stats.get("data", {})
+        if data.get("compact_layers") != 1:
+            raise BenchmarkError(f"compaction did not publish one layer: {stats}")
+        return {
+            "upper_entries": entries,
+            "preparation_ms": round(preparation_ms, 3),
+            "compaction_step_ms": round(elapsed_ms, 3),
+            "step": 151,
+            "compact_layers": data.get("compact_layers"),
+            "mounted_layers": data.get("mounted_layers"),
+            "compacted_bytes": data.get("compacted_bytes"),
+        }
+
+
 def paired_result_markdown(result: dict[str, Any]) -> str:
     lines = [
         "# cowbox M2 paired first-run benchmark",
@@ -1093,6 +1169,21 @@ def result_markdown(result: dict[str, Any]) -> str:
                 f"- Legacy limit rejection at step {rejected['step']} after "
                 f"{rejected['elapsed_ms']:.2f} ms with `{rejected['error_code']}`."
             )
+    compaction = result.get("compaction_entries")
+    if compaction:
+        lines.extend(
+            [
+                "",
+                "## Compaction with a populated upper layer",
+                "",
+                f"- Upper entries: {compaction['upper_entries']:,}.",
+                f"- Preparation: {compaction['preparation_ms']:.2f} ms across 150 steps.",
+                f"- Compaction step 151: **{compaction['compaction_step_ms']:.2f} ms**.",
+                f"- Mounted layers after compaction: {compaction['mounted_layers']}; "
+                f"compacted layers: {compaction['compact_layers']}; "
+                f"reported bytes: {compaction['compacted_bytes']}.",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -1150,6 +1241,7 @@ def main() -> int:
             "depths": args.depths,
             "long_session_steps": args.long_session_steps,
             "long_session_file_count": args.long_session_file_count,
+            "compaction_entries": args.compaction_entries,
             "allow_legacy_layer_limit": args.allow_legacy_layer_limit,
             "require_fs": args.require_fs,
             "timeout_seconds": args.timeout_seconds,
@@ -1231,6 +1323,17 @@ def main() -> int:
                     args.long_session_steps,
                     args.timeout_seconds,
                     args.allow_legacy_layer_limit,
+                )
+            if args.compaction_entries:
+                print(
+                    f"[compaction] preparing {args.compaction_entries:,} upper entries",
+                    flush=True,
+                )
+                result["compaction_entries"] = measure_compaction_entries(
+                    binary,
+                    bench_root,
+                    args.compaction_entries,
+                    args.timeout_seconds,
                 )
         result["machine"]["load_average_at_end"] = [
             round(value, 3) for value in os.getloadavg()

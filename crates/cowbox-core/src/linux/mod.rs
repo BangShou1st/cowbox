@@ -292,6 +292,10 @@ impl SandboxBackend for LinuxBackend {
     fn layer_usage(&self, layout: &SessionLayout, logical_layers: &[u64]) -> Result<LayerUsage> {
         compact::inspect_layer_usage(layout, logical_layers)
     }
+
+    fn recover_compaction_permissions(&self, layout: &SessionLayout) -> Result<()> {
+        compact::recover_pending_permissions(layout)
+    }
 }
 
 fn helper_exe() -> Result<PathBuf> {

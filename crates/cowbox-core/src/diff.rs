@@ -1,3 +1,4 @@
+use crate::compact;
 use crate::error::{CoreError, Result};
 use crate::layout::SessionLayout;
 use crate::manifest::{self, ManifestEntry};
@@ -5,7 +6,7 @@ use crate::model::{ChangeKind, DiffOptions, EntryKind, FileChange};
 use crate::whiteout::{self, UpperEntryKind};
 use sha2::{Digest, Sha256};
 use similar::{ChangeTag, TextDiff};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
@@ -23,7 +24,11 @@ struct LayerEntry {
 }
 
 impl LayerEntry {
-    fn from_metadata(path: &Path, metadata: &fs::Metadata) -> Result<Self> {
+    fn from_metadata(
+        path: &Path,
+        metadata: &fs::Metadata,
+        mode_overrides: &HashMap<PathBuf, u32>,
+    ) -> Result<Self> {
         let kind = manifest::entry_kind(metadata);
         let symlink_target = if kind == EntryKind::Symlink {
             Some(fs::read_link(path)?)
@@ -37,7 +42,10 @@ impl LayerEntry {
         };
         Ok(Self {
             kind,
-            mode: metadata.mode() & 0o7777,
+            mode: mode_overrides
+                .get(path)
+                .copied()
+                .unwrap_or(metadata.mode() & 0o7777),
             size: metadata.len(),
             symlink_target,
             source_path: path.to_path_buf(),
@@ -51,6 +59,42 @@ pub fn compute_diff(
     base_layers: &[u64],
     target_layers: &[u64],
     options: &DiffOptions,
+) -> Result<Vec<FileChange>> {
+    if !base_layers.is_empty() {
+        return Err(CoreError::Config(
+            "M1 only supports diffing from the session base (step 0)".to_string(),
+        ));
+    }
+    let roots = target_layers
+        .iter()
+        .map(|step| layout.upper_dir(*step))
+        .filter(|upper| upper.is_dir())
+        .collect::<Vec<_>>();
+    let journal = compact::access_journal_path(layout, "diff");
+    let mut access = compact::prepare_access(layout, &roots, Some(&journal))?;
+    let result = compute_diff_with_modes(
+        layout,
+        base_layers,
+        target_layers,
+        options,
+        access.overrides(),
+    );
+    let restore = access.restore();
+    match (result, restore) {
+        (Ok(changes), Ok(())) => Ok(changes),
+        (Ok(_), Err(error)) => Err(CoreError::IsolationFailed(format!(
+            "diff completed but source permissions could not be restored: {error}"
+        ))),
+        (Err(error), _) => Err(error),
+    }
+}
+
+pub(crate) fn compute_diff_with_modes(
+    layout: &SessionLayout,
+    base_layers: &[u64],
+    target_layers: &[u64],
+    options: &DiffOptions,
+    mode_overrides: &HashMap<PathBuf, u32>,
 ) -> Result<Vec<FileChange>> {
     let _span = tracing::info_span!(
         "diff_layers",
@@ -106,13 +150,13 @@ pub fn compute_diff(
                     opaque_dirs.insert(rel_path.clone());
                     upserts.insert(
                         rel_path.clone(),
-                        LayerEntry::from_metadata(entry.path(), &metadata)?,
+                        LayerEntry::from_metadata(entry.path(), &metadata, mode_overrides)?,
                     );
                 }
                 UpperEntryKind::Entry => {
                     upserts.insert(
                         rel_path,
-                        LayerEntry::from_metadata(entry.path(), &metadata)?,
+                        LayerEntry::from_metadata(entry.path(), &metadata, mode_overrides)?,
                     );
                 }
             }

@@ -185,15 +185,50 @@ the active root-to-head chain. When another compaction is required, core:
 4. analyzes the temporary result again and compares namespace semantics,
    content hashes, metadata, xattrs, whiteouts, opaque directories, and
    hardlink partitions with the source layers;
-5. writes `layer.json` with the source layer ids and base-manifest fingerprint,
-   then publishes the directory with an atomic rename.
+5. measures the temporary result while its permission elevation is still
+   active;
+6. restores every source and temporary mode, writes `layer.json` with the
+   source layer ids and base-manifest fingerprint, then publishes the directory
+   with an atomic rename.
 
-The session lock serializes compaction with other session mutations. A process
-interruption leaves either an unpublished temporary directory or a complete
-published layer; the original logical layers are never modified, so the next
-run can clean up and retry. `stats` reports logical steps, physical lower layers
+The session lock serializes compaction with other session mutations and with
+readers that need source-layer metadata. A process interruption leaves either
+an unpublished temporary directory or a complete published layer; the next run
+can clean up and retry. `stats` reports logical steps, physical lower layers
 (including the live base), compacted-layer count, and allocated compacted bytes.
 Finalized sessions include compaction artifacts in normal `gc` removal.
+
+#### Permission transaction
+
+An unprivileged process cannot read a `000` file or list a directory without
+owner read/execute permission. Compaction, `diff`, and `commit` therefore use a
+journaled permission transaction instead of a best-effort copy:
+
+1. The journal is created lazily on the first mode change. New attempts write
+   `layers/tmp/<attempt>.permissions.jsonl`; the legacy in-tree
+   `layers/tmp/<attempt>/source-permissions.jsonl` location is still recovered.
+2. Every directory mode is journaled and fsynced before it is elevated.
+   Unreadable regular-file records are collected, fsynced as a batch, and only
+   then given temporary read permission.
+3. Readers (`diff` and `commit`) take the same exclusive session lock as
+   compaction and replay pending journals before scanning. A started
+   compaction and every subsequent reader therefore agree on the original
+   modes.
+4. Restore handles non-directories first and directories deepest-first.
+   Missing ancestors are temporarily reopened while retrying, so a previous
+   interruption that already restored a parent to `000` is recoverable.
+5. The journal is removed only after every recorded mode has been restored.
+   A final JSON line without a newline is treated as an incomplete append and
+   only the complete prefix is restored. A malformed complete line, conflicting
+   duplicate, unsafe path, or invalid mode is a state-corruption error and keeps
+   the journal for diagnosis.
+6. The temporary compacted tree is measured before its modes are restored, so
+   `000` directories cannot make the disk-usage walk fail.
+
+Source layers are restored before a successful command returns. If a command
+fails or is interrupted after a mode change, it leaves either the original
+modes or a durable journal that the next reader or writer recovers under the
+session lock.
 
 `diff` and `commit` always read `steps/<n>/upper` for the logical chain. They do
 not substitute a compacted layer, so historical rollback and branching retain
@@ -327,5 +362,5 @@ wrapper over `wsl.exe`) is M3. For M1:
 | Host file changed during session | commit conflict; `--force` still backs up |
 | Commit interrupted | journal restore; manual recovery path if restore fails |
 | Whiteout format differs from expectation | both char-device and xattr forms supported |
-| Layer compaction interrupted | originals untouched; temporary output is discarded and retried |
+| Layer compaction interrupted | journaled modes restored before readers or retry; temporary output is discarded |
 | Configured host cache data is missing | actionable config error before the command runs |

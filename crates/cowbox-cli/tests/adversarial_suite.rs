@@ -216,6 +216,15 @@ fn crash_cowbox(env: &TestEnv, args: &[&str], point: &str) -> Output {
         .expect("run cowbox with crash injection")
 }
 
+fn fail_cowbox(env: &TestEnv, args: &[&str], point: &str) -> Output {
+    let mut command = env.cowbox();
+    command
+        .args(args)
+        .env("COWBOX_TEST_FAIL", point)
+        .output()
+        .expect("run cowbox with failure injection")
+}
+
 fn assert_sigkill(output: &Output) {
     assert_eq!(
         output.status.signal(),
@@ -240,6 +249,46 @@ fn assert_abort(output: &Output) {
 
 fn session_dir(env: &TestEnv, session_id: &str) -> PathBuf {
     env.state.path().join("sessions").join(session_id)
+}
+
+fn permission_journals(env: &TestEnv, session_id: &str) -> Vec<PathBuf> {
+    let root = session_dir(env, session_id).join("layers/tmp");
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut journals = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".permissions.jsonl"))
+        {
+            journals.push(path);
+        } else if path.is_dir() {
+            let legacy = path.join("source-permissions.jsonl");
+            if legacy.is_file() {
+                journals.push(legacy);
+            }
+        }
+    }
+    journals
+}
+
+fn change_for<'a>(value: &'a Value, rel_path: &str) -> &'a Value {
+    value["data"]["changes"]
+        .as_array()
+        .expect("changes array")
+        .iter()
+        .find(|change| change["rel_path"].as_str() == Some(rel_path))
+        .unwrap_or_else(|| panic!("missing change for {rel_path}: {value}"))
+}
+
+fn mode_for(value: &Value, rel_path: &str) -> u64 {
+    change_for(value, rel_path)["mode"]
+        .as_u64()
+        .expect("change mode")
 }
 
 fn only_commit_journal(env: &TestEnv, session_id: &str) -> PathBuf {
@@ -1609,6 +1658,346 @@ assert os.stat("locked.txt").st_mode & 0o777 == 0
 PY"#,
     );
     assert_eq!(code, 0, "locked file changed after compaction: {view}");
+}
+
+#[test]
+fn unreadable_nested_directories_survive_compaction() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    env.init();
+    let (code, first) = run_script(
+        &env,
+        r#"set -e
+mkdir locked
+printf 'child contents\n' > locked/child.txt
+mkdir nested
+printf 'nested contents\n' > nested/file.txt
+python3 - <<'PY'
+import os
+os.chmod("locked", 0o000)
+os.chmod("nested/file.txt", 0o000)
+os.chmod("nested", 0o000)
+PY"#,
+    );
+    assert_eq!(code, 0, "nested locked run failed: {first}");
+    let session_id = first["session"]["id"].as_str().expect("session id");
+
+    let (code, before) = env.json(&["diff", "--json"]);
+    assert_eq!(code, 0, "diff before compaction failed: {before}");
+    assert_eq!(mode_for(&before, "locked"), 0);
+    assert_eq!(mode_for(&before, "locked/child.txt"), 0o644);
+    assert_eq!(mode_for(&before, "nested"), 0);
+    assert_eq!(mode_for(&before, "nested/file.txt"), 0);
+    let before_changes = before["data"]["changes"].clone();
+
+    for expected in 2..=151 {
+        let (code, run) = env.json(&["run", "--json", "--", "true"]);
+        assert_eq!(code, 0, "long-session step {expected} failed: {run}");
+        assert_eq!(run["data"]["step"].as_u64(), Some(expected));
+    }
+
+    let (code, stats) = env.json(&["stats", "--json"]);
+    assert_eq!(code, 0, "stats failed: {stats}");
+    assert_eq!(stats["data"]["logical_steps"].as_u64(), Some(151));
+    assert_eq!(stats["data"]["compact_layers"].as_u64(), Some(1));
+
+    let (code, after) = env.json(&["diff", "--json"]);
+    assert_eq!(code, 0, "diff after compaction failed: {after}");
+    assert_eq!(
+        after["data"]["changes"], before_changes,
+        "compaction changed nested unreadable modes"
+    );
+    assert!(permission_journals(&env, session_id).is_empty());
+
+    let (code, dry_run) = env.json(&["commit", "--dry-run", "--json"]);
+    assert_eq!(code, 0, "commit dry-run failed: {dry_run}");
+    assert_eq!(mode_for(&dry_run, "locked"), 0);
+    assert_eq!(mode_for(&dry_run, "locked/child.txt"), 0o644);
+    assert_eq!(mode_for(&dry_run, "nested"), 0);
+    assert_eq!(mode_for(&dry_run, "nested/file.txt"), 0);
+    assert_eq!(
+        dry_run["data"]["conflicts"].as_array().map(Vec::len),
+        Some(0)
+    );
+
+    let (code, view) = run_script(
+        &env,
+        r#"set -e
+python3 - <<'PY'
+import os
+assert os.stat("locked").st_mode & 0o777 == 0
+assert os.stat("nested").st_mode & 0o777 == 0
+assert open("locked/child.txt", encoding="utf-8").read() == "child contents\n"
+assert open("nested/file.txt", encoding="utf-8").read() == "nested contents\n"
+PY"#,
+    );
+    assert_eq!(code, 0, "compacted nested view diverged: {view}");
+}
+
+#[test]
+fn failed_permission_restore_keeps_journal_until_modes_are_restored() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    env.init();
+    let (code, first) = run_script(
+        &env,
+        r#"set -e
+mkdir -p locked/inner
+printf 'locked contents\n' > locked/inner/file.txt
+python3 - <<'PY'
+import os
+os.chmod("locked/inner/file.txt", 0o000)
+os.chmod("locked/inner", 0o000)
+os.chmod("locked", 0o000)
+PY"#,
+    );
+    assert_eq!(code, 0, "locked nested run failed: {first}");
+    let session_id = first["session"]["id"].as_str().expect("session id");
+    for expected in 2..=150 {
+        let (code, run) = env.json(&["run", "--json", "--", "true"]);
+        assert_eq!(code, 0, "long-session step {expected} failed: {run}");
+    }
+
+    let failed = fail_cowbox(
+        &env,
+        &["run", "--json", "--", "true"],
+        "permission-restore-before-directories",
+    );
+    assert!(
+        !failed.status.success(),
+        "injected restore failure was ignored"
+    );
+    let value: Value = serde_json::from_slice(&failed.stdout).expect("failure JSON");
+    assert_eq!(
+        value["error"]["code"].as_str(),
+        Some("IO_ERROR"),
+        "unexpected failure: {value}"
+    );
+    let journals = permission_journals(&env, session_id);
+    assert_eq!(
+        journals.len(),
+        1,
+        "permission journal was removed early: {journals:?}"
+    );
+    let source_parent = session_dir(&env, session_id).join("steps/1/upper/locked");
+    assert_eq!(
+        fs::metadata(&source_parent).expect("source parent").mode() & 0o777,
+        0o500,
+        "source parent was not left in the interrupted state"
+    );
+
+    fs::set_permissions(&source_parent, fs::Permissions::from_mode(0o000))
+        .expect("simulate a parent restored before its children");
+    let (code, recovered) = env.json(&["diff", "--json"]);
+    assert_eq!(code, 0, "reader did not recover the journal: {recovered}");
+    assert_eq!(mode_for(&recovered, "locked"), 0);
+    assert_eq!(mode_for(&recovered, "locked/inner"), 0);
+    assert_eq!(mode_for(&recovered, "locked/inner/file.txt"), 0);
+    assert!(permission_journals(&env, session_id).is_empty());
+
+    let (code, dry_run) = env.json(&["commit", "--dry-run", "--json"]);
+    assert_eq!(code, 0, "commit preview failed after recovery: {dry_run}");
+    assert_eq!(mode_for(&dry_run, "locked"), 0);
+    assert_eq!(mode_for(&dry_run, "locked/inner/file.txt"), 0);
+
+    let (code, retried) = env.json(&["run", "--json", "--", "true"]);
+    assert_eq!(code, 0, "retry after interrupted restore failed: {retried}");
+    assert_eq!(retried["data"]["step"].as_u64(), Some(151));
+    let (code, stats) = env.json(&["stats", "--json"]);
+    assert_eq!(code, 0, "stats failed after retry: {stats}");
+    assert_eq!(stats["data"]["compact_layers"].as_u64(), Some(1));
+}
+
+#[test]
+fn interrupted_compaction_permissions_are_restored_for_readers_and_retry() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    env.init();
+    let (code, first) = run_script(
+        &env,
+        r#"set -e
+printf 'locked contents\n' > locked.txt
+mkdir locked-dir
+printf 'child contents\n' > locked-dir/child.txt
+python3 - <<'PY'
+import os
+os.chmod("locked.txt", 0o000)
+os.chmod("locked-dir", 0o000)
+PY"#,
+    );
+    assert_eq!(code, 0, "locked run failed: {first}");
+    let session_id = first["session"]["id"].as_str().expect("session id");
+    for expected in 2..=150 {
+        let (code, run) = env.json(&["run", "--json", "--", "true"]);
+        assert_eq!(code, 0, "long-session step {expected} failed: {run}");
+    }
+
+    let crashed = crash_cowbox(
+        &env,
+        &["run", "--json", "--", "true"],
+        "compaction-after-source-permissions",
+    );
+    assert_sigkill(&crashed);
+    let session = session_dir(&env, session_id);
+    assert_eq!(
+        fs::metadata(session.join("steps/1/upper/locked.txt"))
+            .expect("elevated file")
+            .mode()
+            & 0o777,
+        0o400
+    );
+    assert_eq!(
+        fs::metadata(session.join("steps/1/upper/locked-dir"))
+            .expect("elevated directory")
+            .mode()
+            & 0o777,
+        0o500
+    );
+    assert!(!permission_journals(&env, session_id).is_empty());
+
+    let (code, diff) = env.json(&["diff", "--json"]);
+    assert_eq!(
+        code, 0,
+        "diff did not recover interrupted compaction: {diff}"
+    );
+    assert_eq!(mode_for(&diff, "locked.txt"), 0);
+    assert_eq!(mode_for(&diff, "locked-dir"), 0);
+    assert_eq!(mode_for(&diff, "locked-dir/child.txt"), 0o644);
+    assert!(permission_journals(&env, session_id).is_empty());
+
+    let (code, dry_run) = env.json(&["commit", "--dry-run", "--json"]);
+    assert_eq!(code, 0, "commit preview failed after recovery: {dry_run}");
+    assert_eq!(mode_for(&dry_run, "locked.txt"), 0);
+    assert_eq!(mode_for(&dry_run, "locked-dir"), 0);
+
+    let (code, retried) = env.json(&["run", "--json", "--", "true"]);
+    assert_eq!(code, 0, "compaction retry failed: {retried}");
+    assert_eq!(retried["data"]["step"].as_u64(), Some(151));
+    let (code, stats) = env.json(&["stats", "--json"]);
+    assert_eq!(code, 0, "stats failed: {stats}");
+    assert_eq!(stats["data"]["compact_layers"].as_u64(), Some(1));
+
+    let (code, after) = env.json(&["diff", "--json"]);
+    assert_eq!(code, 0, "diff after retry failed: {after}");
+    assert_eq!(mode_for(&after, "locked.txt"), 0);
+    assert_eq!(mode_for(&after, "locked-dir"), 0);
+    assert_eq!(mode_for(&after, "locked-dir/child.txt"), 0o644);
+}
+
+#[test]
+fn interrupted_permission_restore_is_idempotent() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    env.init();
+    let (code, first) = run_script(
+        &env,
+        r#"set -e
+mkdir -p locked/inner
+printf 'locked contents\n' > locked/inner/file.txt
+python3 - <<'PY'
+import os
+os.chmod("locked/inner/file.txt", 0o000)
+os.chmod("locked/inner", 0o000)
+os.chmod("locked", 0o000)
+PY"#,
+    );
+    assert_eq!(code, 0, "locked nested run failed: {first}");
+    let session_id = first["session"]["id"].as_str().expect("session id");
+    for expected in 2..=150 {
+        let (code, run) = env.json(&["run", "--json", "--", "true"]);
+        assert_eq!(code, 0, "long-session step {expected} failed: {run}");
+    }
+
+    let crashed = crash_cowbox(
+        &env,
+        &["run", "--json", "--", "true"],
+        "permission-restore-after-first-directory",
+    );
+    assert_sigkill(&crashed);
+    assert!(!permission_journals(&env, session_id).is_empty());
+    let source_parent = session_dir(&env, session_id).join("steps/1/upper/locked");
+    fs::set_permissions(&source_parent, fs::Permissions::from_mode(0o000))
+        .expect("simulate a parent restored before the child directory");
+
+    let (code, recovered) = env.json(&["diff", "--json"]);
+    assert_eq!(code, 0, "diff did not resume restore: {recovered}");
+    assert_eq!(mode_for(&recovered, "locked"), 0);
+    assert_eq!(mode_for(&recovered, "locked/inner"), 0);
+    assert_eq!(mode_for(&recovered, "locked/inner/file.txt"), 0);
+    assert!(permission_journals(&env, session_id).is_empty());
+
+    let (code, retried) = env.json(&["run", "--json", "--", "true"]);
+    assert_eq!(code, 0, "retry after interrupted restore failed: {retried}");
+    assert_eq!(retried["data"]["step"].as_u64(), Some(151));
+    let (code, stats) = env.json(&["stats", "--json"]);
+    assert_eq!(code, 0, "stats failed after retry: {stats}");
+    assert_eq!(stats["data"]["compact_layers"].as_u64(), Some(1));
+}
+
+#[test]
+fn permission_journal_tail_recovery_and_corruption_diagnostics() {
+    let env = TestEnv::new();
+    if !require_sandbox(&env) {
+        return;
+    }
+    env.init();
+    let (code, first) = run_script(&env, "mkdir recovered");
+    assert_eq!(code, 0, "recovered directory run failed: {first}");
+    let session_id = first["session"]["id"].as_str().expect("session id");
+    let source = session_dir(&env, session_id).join("steps/1/upper/recovered");
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o500))
+        .expect("simulate elevated directory");
+    let legacy_root = session_dir(&env, session_id).join("layers/tmp/interrupted");
+    fs::create_dir_all(&legacy_root).expect("legacy journal root");
+    let legacy = legacy_root.join("source-permissions.jsonl");
+    fs::write(
+        &legacy,
+        concat!(
+            "{\"path\":\"steps/1/upper/recovered\",\"mode\":0}\n",
+            "{\"path\":\"steps/1/upper/recovered/child\",\"mode\":0"
+        ),
+    )
+    .expect("legacy journal");
+
+    let (code, second) = env.json(&["run", "--json", "--", "true"]);
+    assert_eq!(
+        code, 0,
+        "run did not recover a partial journal tail: {second}"
+    );
+    assert_eq!(second["data"]["step"].as_u64(), Some(2));
+    assert_eq!(
+        fs::metadata(&source).expect("restored directory").mode() & 0o777,
+        0
+    );
+    assert!(!legacy.exists());
+    assert!(permission_journals(&env, session_id).is_empty());
+
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o500))
+        .expect("simulate second elevation");
+    let broken_root = session_dir(&env, session_id).join("layers/tmp/broken");
+    fs::create_dir_all(&broken_root).expect("broken journal root");
+    let broken = broken_root.join("source-permissions.jsonl");
+    fs::write(
+        &broken,
+        "{\"path\":\"steps/1/upper/recovered\",\"mode\":0}\nnot-json\n",
+    )
+    .expect("broken journal");
+    let (code, failed) = env.json(&["run", "--json", "--", "true"]);
+    assert_ne!(code, 0, "corrupt journal was accepted: {failed}");
+    assert_eq!(failed["error"]["code"].as_str(), Some("STATE_CORRUPTED"));
+    assert!(broken.exists(), "corrupt journal was deleted");
+    assert_eq!(
+        fs::metadata(&source).expect("mode remains elevated").mode() & 0o777,
+        0o500
+    );
 }
 
 #[test]

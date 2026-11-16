@@ -1,4 +1,5 @@
-use crate::diff::compute_diff;
+use crate::compact;
+use crate::diff::compute_diff_with_modes;
 use crate::error::{CoreError, Result};
 use crate::layout::SessionLayout;
 use crate::manifest::{self, ManifestEntry};
@@ -9,7 +10,7 @@ use crate::model::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -90,6 +91,30 @@ pub fn commit_layers(
     target_layers: &[u64],
     options: &CommitOptions,
 ) -> Result<CommitReport> {
+    let roots = target_layers
+        .iter()
+        .map(|step| layout.upper_dir(*step))
+        .filter(|upper| upper.is_dir())
+        .collect::<Vec<_>>();
+    let journal = compact::access_journal_path(layout, "commit");
+    let mut access = compact::prepare_access(layout, &roots, Some(&journal))?;
+    let result = commit_layers_with_modes(layout, target_layers, options, access.overrides());
+    let restore = access.restore();
+    match (result, restore) {
+        (Ok(report), Ok(())) => Ok(report),
+        (Ok(_), Err(error)) => Err(CoreError::CommitFailed(format!(
+            "commit finished but source permissions could not be restored: {error}; run `cowbox commit --recover --yes` after resolving the permission error"
+        ))),
+        (Err(error), _) => Err(error),
+    }
+}
+
+fn commit_layers_with_modes(
+    layout: &SessionLayout,
+    target_layers: &[u64],
+    options: &CommitOptions,
+    mode_overrides: &HashMap<PathBuf, u32>,
+) -> Result<CommitReport> {
     let _span = tracing::info_span!(
         "commit_layers",
         layers = target_layers.len(),
@@ -109,7 +134,8 @@ pub fn commit_layers(
         max_line_stat_bytes: 0,
         excluded: options.excluded.clone(),
     };
-    let changes = compute_diff(layout, &[], target_layers, &diff_options)?;
+    let changes =
+        compute_diff_with_modes(layout, &[], target_layers, &diff_options, mode_overrides)?;
     if changes.is_empty() {
         return Ok(CommitReport {
             changes,
@@ -120,7 +146,7 @@ pub fn commit_layers(
     }
 
     let base = manifest::load_manifest(&layout.base_manifest_path())?;
-    let changes = expand_sqlite_sidecars(layout, target_layers, &base, changes)?;
+    let changes = expand_sqlite_sidecars(layout, target_layers, &base, changes, mode_overrides)?;
     reject_vcs_metadata(layout, &changes)?;
 
     let conflicts = find_conflicts(layout, &base, &changes);
@@ -158,7 +184,14 @@ pub fn commit_layers(
     };
     write_json_atomic(&journal_dir.join("meta.json"), &meta)?;
 
-    let ops = match build_ops(layout, target_layers, &base, &changes, &backup_dir) {
+    let ops = match build_ops(
+        layout,
+        target_layers,
+        &base,
+        &changes,
+        &backup_dir,
+        mode_overrides,
+    ) {
         Ok(ops) => ops,
         Err(error) => {
             let _ = fs::remove_dir_all(&journal_dir);
@@ -172,7 +205,7 @@ pub fn commit_layers(
 
     meta.phase = CommitPhase::Applying;
     write_json_atomic(&journal_dir.join("meta.json"), &meta)?;
-    match apply_changes(layout, target_layers, &changes) {
+    match apply_changes(layout, target_layers, &changes, mode_overrides) {
         Ok(()) => {
             meta.phase = CommitPhase::Applied;
             if let Err(error) = write_json_atomic(&journal_dir.join("meta.json"), &meta) {
@@ -358,20 +391,23 @@ fn build_ops(
     base: &BTreeMap<PathBuf, ManifestEntry>,
     changes: &[FileChange],
     backup_dir: &Path,
+    mode_overrides: &HashMap<PathBuf, u32>,
 ) -> Result<Vec<CommitOp>> {
     let mut ops = Vec::with_capacity(changes.len());
     let mut backup_links = BTreeMap::new();
     let original_dir = backup_dir.with_file_name("original");
     for change in changes {
         let host_path = layout.workspace.join(&change.rel_path);
-        let pre = fingerprint(&host_path)?;
+        let pre = fingerprint_host_path(&host_path)
+            .map_err(|error| commit_context("fingerprint host path", &host_path, error))?;
         let (backup_path, original_path) = if matches!(pre, Fingerprint::Absent) {
             (None, None)
         } else {
             let destination = backup_dir.join(&change.rel_path);
-            backup_entry(&host_path, &destination, &mut backup_links)?;
-            let original =
-                create_original_backup(&host_path, &original_dir.join(&change.rel_path))?;
+            backup_entry(&host_path, &destination, &mut backup_links)
+                .map_err(|error| commit_context("back up host path", &host_path, error))?;
+            let original = create_original_backup(&host_path, &original_dir.join(&change.rel_path))
+                .map_err(|error| commit_context("create original backup", &host_path, error))?;
             (Some(destination), original)
         };
         let post = match change.kind {
@@ -384,7 +420,8 @@ fn build_ops(
                             change.rel_path.display()
                         ))
                     })?;
-                let mut post = fingerprint(&source)?;
+                let mut post = fingerprint_with_modes(&source, mode_overrides)
+                    .map_err(|error| commit_context("fingerprint sandbox path", &source, error))?;
                 normalize_applied_fingerprint(&mut post);
                 post
             }
@@ -413,6 +450,28 @@ fn normalize_applied_fingerprint(fingerprint: &mut Fingerprint) {
 }
 
 fn fingerprint(path: &Path) -> Result<Fingerprint> {
+    fingerprint_with_modes(path, &HashMap::new())
+}
+
+fn fingerprint_host_path(path: &Path) -> Result<Fingerprint> {
+    match fingerprint(path) {
+        Ok(fingerprint) => Ok(fingerprint),
+        Err(CoreError::Io(error))
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(Fingerprint::Absent)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn fingerprint_with_modes(
+    path: &Path,
+    mode_overrides: &HashMap<PathBuf, u32>,
+) -> Result<Fingerprint> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -421,15 +480,19 @@ fn fingerprint(path: &Path) -> Result<Fingerprint> {
         Err(error) => return Err(error.into()),
     };
     let kind = manifest::entry_kind(&metadata);
+    let mode = mode_overrides
+        .get(path)
+        .copied()
+        .unwrap_or(metadata.mode() & 0o7777);
     match kind {
         EntryKind::File => Ok(Fingerprint::File {
-            mode: metadata.mode() & 0o7777,
+            mode,
             size: metadata.len(),
             sha256: hash_file(path)?,
             xattr_digest: crate::xattr::digest_checked(path)?,
         }),
         EntryKind::Directory => Ok(Fingerprint::Directory {
-            mode: metadata.mode() & 0o7777,
+            mode,
             xattr_digest: crate::xattr::digest_checked(path)?,
         }),
         EntryKind::Symlink => Ok(Fingerprint::Symlink {
@@ -498,6 +561,7 @@ fn apply_changes(
     layout: &SessionLayout,
     target_layers: &[u64],
     changes: &[FileChange],
+    mode_overrides: &HashMap<PathBuf, u32>,
 ) -> Result<()> {
     let mut deletions: Vec<&FileChange> = changes
         .iter()
@@ -510,7 +574,9 @@ fn apply_changes(
         .collect();
     deletions.sort_by_key(|change| std::cmp::Reverse(path_depth(&change.rel_path)));
     for change in deletions {
-        remove_path_if_exists(&layout.workspace.join(&change.rel_path))?;
+        let host_path = layout.workspace.join(&change.rel_path);
+        remove_path_if_exists(&host_path)
+            .map_err(|error| commit_context("delete host path", &host_path, error))?;
     }
 
     let base = manifest::load_manifest(&layout.base_manifest_path())?;
@@ -521,9 +587,11 @@ fn apply_changes(
         })
         .collect();
     directories.sort_by_key(|change| path_depth(&change.rel_path));
+    let mut directory_finalize = Vec::new();
     for change in directories {
         let host_path = layout.workspace.join(&change.rel_path);
-        fs::create_dir_all(&host_path)?;
+        fs::create_dir_all(&host_path)
+            .map_err(|error| commit_context("create host directory", &host_path, error))?;
         let source = manifest::visible_path(layout, target_layers, &change.rel_path, &base)
             .ok_or_else(|| {
                 CoreError::CommitFailed(format!(
@@ -531,12 +599,15 @@ fn apply_changes(
                     change.rel_path.display()
                 ))
             })?;
-        let metadata = fs::symlink_metadata(&source)?;
-        crate::xattr::copy(&source, &host_path)?;
-        fs::set_permissions(
-            &host_path,
-            fs::Permissions::from_mode(metadata.mode() & !0o6000),
-        )?;
+        let metadata = fs::symlink_metadata(&source)
+            .map_err(|error| commit_context("read sandbox directory", &source, error))?;
+        let mode = mode_overrides
+            .get(&source)
+            .copied()
+            .unwrap_or(metadata.mode() & 0o7777);
+        fs::set_permissions(&host_path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| commit_context("prepare host directory", &host_path, error))?;
+        directory_finalize.push((change.rel_path.clone(), source, mode));
     }
 
     let mut files: Vec<&FileChange> = changes
@@ -589,7 +660,8 @@ fn apply_changes(
     for change in files {
         let host_path = layout.workspace.join(&change.rel_path);
         if let Some(parent) = host_path.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent)
+                .map_err(|error| commit_context("create host parent directory", parent, error))?;
         }
         let source = manifest::visible_path(layout, target_layers, &change.rel_path, &base)
             .ok_or_else(|| {
@@ -598,12 +670,14 @@ fn apply_changes(
                     change.rel_path.display()
                 ))
             })?;
-        let metadata = fs::symlink_metadata(&source)?;
+        let metadata = fs::symlink_metadata(&source)
+            .map_err(|error| commit_context("read sandbox entry", &source, error))?;
         if metadata.file_type().is_symlink() {
             let target = fs::read_link(&source)?;
             let temp = temp_path(&host_path);
             let _ = fs::remove_file(&temp);
-            symlink(target, &temp)?;
+            symlink(target, &temp)
+                .map_err(|error| commit_context("create host symlink", &temp, error))?;
             replace_path(&temp, &host_path)?;
             test_crash_once(&mut first_write_seen, "commit-after-first-write");
         } else if metadata.is_file() {
@@ -612,13 +686,19 @@ fn apply_changes(
                     let primary_host = layout.workspace.join(primary);
                     let temp = temp_path(&host_path);
                     let _ = fs::remove_file(&temp);
-                    fs::hard_link(&primary_host, &temp)?;
+                    fs::hard_link(&primary_host, &temp)
+                        .map_err(|error| commit_context("create host hardlink", &temp, error))?;
                     replace_path(&temp, &host_path)?;
                     test_crash_once(&mut first_write_seen, "commit-after-first-write");
                     continue;
                 }
             }
-            write_file_atomically(&source, &host_path, metadata.mode() & 0o7777)?;
+            let mode = mode_overrides
+                .get(&source)
+                .copied()
+                .unwrap_or(metadata.mode() & 0o7777);
+            write_file_atomically(&source, &host_path, mode)
+                .map_err(|error| commit_context("write host file", &host_path, error))?;
             test_crash_once(&mut first_write_seen, "commit-after-first-write");
         } else {
             return Err(CoreError::CommitFailed(format!(
@@ -627,14 +707,24 @@ fn apply_changes(
             )));
         }
     }
+    directory_finalize.sort_by_key(|(rel_path, _, _)| std::cmp::Reverse(path_depth(rel_path)));
+    for (rel_path, source, mode) in directory_finalize {
+        let host_path = layout.workspace.join(rel_path);
+        crate::xattr::copy(&source, &host_path)
+            .map_err(|error| commit_context("copy host directory xattrs", &host_path, error))?;
+        fs::set_permissions(&host_path, fs::Permissions::from_mode(mode & !0o6000))
+            .map_err(|error| commit_context("finalize host directory mode", &host_path, error))?;
+    }
     Ok(())
 }
 
 fn write_file_atomically(source: &Path, target: &Path, mode: u32) -> Result<()> {
     let temp = temp_path(target);
     let _ = fs::remove_file(&temp);
-    let mut reader = File::open(source)?;
-    let mut writer = File::create(&temp)?;
+    let mut reader =
+        File::open(source).map_err(|error| commit_context("open sandbox file", source, error))?;
+    let mut writer = File::create(&temp)
+        .map_err(|error| commit_context("create host temp file", &temp, error))?;
     let mut buffer = [0u8; 64 * 1024];
     loop {
         let read = reader.read(&mut buffer)?;
@@ -643,16 +733,22 @@ fn write_file_atomically(source: &Path, target: &Path, mode: u32) -> Result<()> 
         }
         writer.write_all(&buffer[..read])?;
     }
-    writer.sync_all()?;
-    let metadata = fs::symlink_metadata(source)?;
+    writer
+        .sync_all()
+        .map_err(|error| commit_context("sync host temp file", &temp, error))?;
+    let metadata = fs::symlink_metadata(source)
+        .map_err(|error| commit_context("read sandbox file metadata", source, error))?;
     let safe_mode = mode & !0o6000;
-    crate::xattr::copy(source, &temp)?;
-    fs::set_permissions(&temp, fs::Permissions::from_mode(safe_mode))?;
+    crate::xattr::copy(source, &temp)
+        .map_err(|error| commit_context("copy sandbox file xattrs", source, error))?;
     let mtime = filetime::FileTime::from_unix_time(
         metadata.mtime(),
         u32::try_from(metadata.mtime_nsec()).unwrap_or(0),
     );
-    filetime::set_file_mtime(&temp, mtime)?;
+    filetime::set_file_mtime(&temp, mtime)
+        .map_err(|error| commit_context("set host temp file mtime", &temp, error))?;
+    fs::set_permissions(&temp, fs::Permissions::from_mode(safe_mode))
+        .map_err(|error| commit_context("set host temp file mode", &temp, error))?;
     replace_path(&temp, target)
 }
 
@@ -821,14 +917,14 @@ fn backup_entry(
         fs::create_dir_all(destination)?;
         fs::set_permissions(destination, fs::Permissions::from_mode(0o700))?;
         crate::xattr::copy(source, destination)?;
-        fs::set_permissions(
-            destination,
-            fs::Permissions::from_mode(metadata.mode() & 0o7777),
-        )?;
         for child in fs::read_dir(source)? {
             let child = child?;
             backup_entry(&child.path(), &destination.join(child.file_name()), links)?;
         }
+        fs::set_permissions(
+            destination,
+            fs::Permissions::from_mode(metadata.mode() & 0o7777),
+        )?;
     } else if metadata.is_file() {
         let _ = fs::remove_file(destination);
         if metadata.nlink() > 1 {
@@ -843,15 +939,15 @@ fn backup_entry(
         fs::copy(source, destination)?;
         fs::set_permissions(destination, fs::Permissions::from_mode(0o600))?;
         crate::xattr::copy(source, destination)?;
-        fs::set_permissions(
-            destination,
-            fs::Permissions::from_mode(metadata.mode() & 0o7777),
-        )?;
         let mtime = filetime::FileTime::from_unix_time(
             metadata.mtime(),
             u32::try_from(metadata.mtime_nsec()).unwrap_or(0),
         );
         filetime::set_file_mtime(destination, mtime)?;
+        fs::set_permissions(
+            destination,
+            fs::Permissions::from_mode(metadata.mode() & 0o7777),
+        )?;
     } else {
         return Err(CoreError::CommitFailed(format!(
             "cannot journal unsupported entry {}",
@@ -927,14 +1023,14 @@ fn restore_entry(
         fs::create_dir_all(destination)?;
         fs::set_permissions(destination, fs::Permissions::from_mode(0o700))?;
         crate::xattr::copy(source, destination)?;
-        fs::set_permissions(
-            destination,
-            fs::Permissions::from_mode(metadata.mode() & 0o7777),
-        )?;
         for child in fs::read_dir(source)? {
             let child = child?;
             restore_entry(&child.path(), &destination.join(child.file_name()), links)?;
         }
+        fs::set_permissions(
+            destination,
+            fs::Permissions::from_mode(metadata.mode() & 0o7777),
+        )?;
     } else if metadata.is_file() {
         let _ = fs::remove_file(destination);
         if fs::hard_link(source, destination).is_ok() {
@@ -952,15 +1048,15 @@ fn restore_entry(
         fs::copy(source, destination)?;
         fs::set_permissions(destination, fs::Permissions::from_mode(0o600))?;
         crate::xattr::copy(source, destination)?;
-        fs::set_permissions(
-            destination,
-            fs::Permissions::from_mode(metadata.mode() & 0o7777),
-        )?;
         let mtime = filetime::FileTime::from_unix_time(
             metadata.mtime(),
             u32::try_from(metadata.mtime_nsec()).unwrap_or(0),
         );
         filetime::set_file_mtime(destination, mtime)?;
+        fs::set_permissions(
+            destination,
+            fs::Permissions::from_mode(metadata.mode() & 0o7777),
+        )?;
     } else {
         return Err(CoreError::CommitFailed(format!(
             "cannot restore unsupported entry {}",
@@ -1012,6 +1108,7 @@ fn expand_sqlite_sidecars(
     target_layers: &[u64],
     base: &BTreeMap<PathBuf, ManifestEntry>,
     changes: Vec<FileChange>,
+    mode_overrides: &HashMap<PathBuf, u32>,
 ) -> Result<Vec<FileChange>> {
     let mut by_path: BTreeMap<PathBuf, FileChange> = changes
         .into_iter()
@@ -1034,7 +1131,7 @@ fn expand_sqlite_sidecars(
                 Some(source) => {
                     by_path.insert(
                         sidecar.clone(),
-                        synthesized_change(&sidecar, &source, base.get(&sidecar))?,
+                        synthesized_change(&sidecar, &source, base.get(&sidecar), mode_overrides)?,
                     );
                 }
                 None => {
@@ -1081,6 +1178,7 @@ fn synthesized_change(
     rel_path: &Path,
     source: &Path,
     base_entry: Option<&ManifestEntry>,
+    mode_overrides: &HashMap<PathBuf, u32>,
 ) -> Result<FileChange> {
     let metadata = fs::symlink_metadata(source)?;
     let entry_kind = manifest::entry_kind(&metadata);
@@ -1102,7 +1200,12 @@ fn synthesized_change(
         size_delta: i64::try_from(metadata.len()).unwrap_or(i64::MAX) - base_size,
         lines_added: None,
         lines_removed: None,
-        mode: Some(metadata.mode() & 0o7777),
+        mode: Some(
+            mode_overrides
+                .get(source)
+                .copied()
+                .unwrap_or(metadata.mode() & 0o7777),
+        ),
         excluded: false,
     })
 }
@@ -1159,6 +1262,10 @@ fn action_name(kind: &ChangeKind) -> &'static str {
         ChangeKind::SymlinkUpdated { .. } => "symlink",
         ChangeKind::TypeChanged { .. } => "type-changed",
     }
+}
+
+fn commit_context(action: &str, path: &Path, error: impl std::fmt::Display) -> CoreError {
+    CoreError::CommitFailed(format!("{action} {}: {error}", path.display()))
 }
 
 fn path_depth(path: &Path) -> usize {
@@ -1373,15 +1480,76 @@ enum HostState {
 }
 
 fn ensure_host_state(layout: &SessionLayout, ops: &[CommitOp], expected: HostState) -> Result<()> {
-    let mut conflicts = Vec::new();
+    let mut post_restricted = BTreeSet::new();
     for op in ops {
-        let current = fingerprint(&layout.workspace.join(&op.rel_path))?;
+        if let Fingerprint::Directory { mode, .. } = &op.post {
+            if *mode & 0o100 == 0 {
+                post_restricted.insert(op.rel_path.clone());
+            }
+        }
+    }
+    let mut post_confirmed = BTreeSet::new();
+    let mut ordered = ops.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|op| (path_depth(&op.rel_path), op.rel_path.clone()));
+    let mut conflicts = Vec::new();
+    for op in ordered {
+        let restricted_ancestor = op
+            .rel_path
+            .ancestors()
+            .skip(1)
+            .find(|ancestor| post_restricted.contains(*ancestor));
+        if restricted_ancestor.is_some_and(|ancestor| post_confirmed.contains(ancestor)) {
+            // The parent directory is confirmed to be the post-state directory
+            // without owner execute permission. An unprivileged host reader
+            // cannot observe or change descendants without first changing and
+            // restoring that parent mode, so the recorded post-state stands.
+            continue;
+        }
+        let host_path = layout.workspace.join(&op.rel_path);
+        let current = match fingerprint(&host_path) {
+            Ok(current) => current,
+            Err(CoreError::Io(error))
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && post_requires_metadata_only(&op.post) =>
+            {
+                match fingerprint_metadata_matches(&host_path, &op.post) {
+                    Ok(true) => {
+                        if matches!(op.post, Fingerprint::Directory { .. }) {
+                            post_confirmed.insert(op.rel_path.clone());
+                        }
+                        continue;
+                    }
+                    Ok(false) => {
+                        conflicts.push(op.rel_path.clone());
+                        continue;
+                    }
+                    Err(CoreError::Io(error))
+                        if error.kind() == std::io::ErrorKind::PermissionDenied
+                            && restricted_ancestor.is_some() =>
+                    {
+                        conflicts.push(op.rel_path.clone());
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(CoreError::Io(error))
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && restricted_ancestor.is_some() =>
+            {
+                conflicts.push(op.rel_path.clone());
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let matches = match expected {
             HostState::PreOrPost => current == op.pre || current == op.post,
             HostState::PostOnly => current == op.post,
         };
         if !matches {
             conflicts.push(op.rel_path.clone());
+        } else if current == op.post {
+            post_confirmed.insert(op.rel_path.clone());
         }
     }
     if !conflicts.is_empty() {
@@ -1397,6 +1565,28 @@ fn ensure_host_state(layout: &SessionLayout, ops: &[CommitOp], expected: HostSta
     Ok(())
 }
 
+fn post_requires_metadata_only(fingerprint: &Fingerprint) -> bool {
+    match fingerprint {
+        Fingerprint::File { mode, .. } => *mode & 0o400 == 0,
+        Fingerprint::Directory { mode, .. } => *mode & 0o500 != 0o500,
+        Fingerprint::Absent | Fingerprint::Symlink { .. } | Fingerprint::Other => false,
+    }
+}
+
+fn fingerprint_metadata_matches(path: &Path, expected: &Fingerprint) -> Result<bool> {
+    let metadata = fs::symlink_metadata(path)?;
+    let kind = manifest::entry_kind(&metadata);
+    Ok(match expected {
+        Fingerprint::File { mode, size, .. } => {
+            kind == EntryKind::File && metadata.mode() & 0o7777 == *mode && metadata.len() == *size
+        }
+        Fingerprint::Directory { mode, .. } => {
+            kind == EntryKind::Directory && metadata.mode() & 0o7777 == *mode
+        }
+        Fingerprint::Absent | Fingerprint::Symlink { .. } | Fingerprint::Other => false,
+    })
+}
+
 fn cleanup_finished_backups(layout: &SessionLayout) -> Result<()> {
     for record in scan_journals(layout)? {
         if matches!(
@@ -1410,8 +1600,26 @@ fn cleanup_finished_backups(layout: &SessionLayout) -> Result<()> {
 }
 
 fn remove_backup_material(journal_dir: &Path) {
-    let _ = fs::remove_dir_all(journal_dir.join("backup"));
-    let _ = fs::remove_dir_all(journal_dir.join("original"));
+    for root in [journal_dir.join("backup"), journal_dir.join("original")] {
+        if root.exists() {
+            let _ = make_backup_tree_removable(&root);
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+}
+
+fn make_backup_tree_removable(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        for entry in fs::read_dir(path)? {
+            make_backup_tree_removable(&entry?.path())?;
+        }
+    }
+    Ok(())
 }
 
 fn test_crash(point: &str) {

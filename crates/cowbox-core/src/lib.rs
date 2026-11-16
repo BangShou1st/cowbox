@@ -69,6 +69,10 @@ pub trait SandboxBackend: Send + Sync {
     fn destroy_session(&self, layout: &SessionLayout) -> Result<()>;
 
     fn layer_usage(&self, layout: &SessionLayout, logical_layers: &[u64]) -> Result<LayerUsage>;
+
+    /// Restore any source-layer permission changes left by an interrupted
+    /// compaction or read transaction. Callers must hold the session lock.
+    fn recover_compaction_permissions(&self, layout: &SessionLayout) -> Result<()>;
 }
 
 pub fn platform_backend() -> Box<dyn SandboxBackend> {
@@ -157,5 +161,9 @@ impl SandboxBackend for UnsupportedBackend {
             compact_layers: 0,
             compacted_bytes: 0,
         })
+    }
+
+    fn recover_compaction_permissions(&self, _layout: &SessionLayout) -> Result<()> {
+        Ok(())
     }
 }
